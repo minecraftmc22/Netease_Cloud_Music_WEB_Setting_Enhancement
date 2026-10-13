@@ -2,8 +2,8 @@
 // @name         网易云音乐设置增强(NCMWSE)
 // @name:en      Netease Cloud Music WEB Setting Enhancement
 // @namespace    https://github.com/minecraftmc22/Netease_Cloud_Music_WEB_Setting_Enhancement
-// @version      1.3.4
-// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/专辑/网站名称），带快速预设、独立翻译开关、歌词时间戳配对、配置导入导出与诊断信息
+// @version      1.3.6
+// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。设置面板采用选项卡布局：SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/翻译/专辑/网站名称），带快速预设、歌词时间戳配对、配置导入导出与诊断信息
 // @description:en  Detect the song playing on Netease Cloud Music web player, sync "song / artist" or "current lyric / song-artist" to Windows SMTC, and customize the page title with drag-and-drop segments.
 // @author       Minecraftmc22
 // @license      MIT
@@ -30,14 +30,18 @@
    *       （Win+G / 音量键 / 锁屏显示的媒体卡片）。
    *
    * 1) 系统媒体（SMTC）：三个可自由编排的栏位 —— 标题栏 / 歌手栏 / 专辑栏，
-   *      每栏都是一份「片段列表」（歌曲名 / 歌手 / 歌词 / 专辑 / 网站名称），
+   *      每栏都是一份「片段列表」（歌曲名 / 歌手 / 歌词 / 翻译 / 专辑 / 网站名称），
    *      可拖拽排序、增删，三栏共用一个片段连接符；
-   *      内置预设：歌曲名/歌手、歌词/歌曲名 - 歌手。
-   *      「歌词」片段是否带译文由「启用翻译?（系统媒体）」单独控制。
+   *      内置预设：歌曲名/歌手、歌词/歌曲名 - 歌手、歌词 翻译/歌曲名 - 歌手。
    * 2) 网页标题：同样的片段列表，可拖拽排序，
-   *      内置预设：歌曲名 - 歌手 - 网站名称 / 歌词(翻译) - 歌曲名 - 歌手 / 歌词(翻译)。
-   *      译文由「启用翻译?（网页标题）」单独控制，与系统媒体那个互不影响。
-   * 3) 配置可导出为 JSON（复制或下载），也能从粘贴内容 / 文件导入。
+   *      内置预设：歌曲名 - 歌手 - 网站名称 / 歌词 翻译 - 歌曲名 - 歌手 / 歌词 翻译。
+   * 3) 「翻译」本身就是一个片段：把它排进片段列表即可显示当前歌词的译文，
+   *      位置随意（歌词 - 翻译、翻译 - 歌词、单独一栏都行）；
+   *      本句没有译文时该片段为空并自动跳过，不会沿用上一句。
+   * 4) 配置可导出为 JSON（复制或下载），也能从粘贴内容 / 文件导入。
+   *
+   * 设置面板：左侧选项卡（常规 / 系统媒体 / 网页标题 / 诊断信息）切换，
+   *      每个版块一页；切换时指示块滑动 + 页面淡入上移，套用预设时片段逐行滑入。
    * ========================================================================= */
 
   const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -46,17 +50,18 @@
   /* ============================ 配置 ============================ */
 
   const CFG_KEY = 'ncm_smtc_cfg';
-  const VER = '1.3.4';
+  const VER = '1.3.6';
 
-  // 可用的片段类型
+  // 可用的片段类型（「翻译」也是片段：放在哪、和谁拼，全由片段顺序决定）
   const PART_META = {
     song: { name: '歌曲名', hasText: false },
     artist: { name: '歌手', hasText: false },
     lyric: { name: '歌词', hasText: false },
+    trans: { name: '翻译', hasText: false },
     album: { name: '专辑', hasText: false },
     site: { name: '网站名称', hasText: true, def: '网易云音乐' }
   };
-  const PART_ORDER = ['song', 'artist', 'lyric', 'album', 'site'];
+  const PART_ORDER = ['song', 'artist', 'lyric', 'trans', 'album', 'site'];
 
   function defPart(type) {
     const m = PART_META[type];
@@ -68,7 +73,6 @@
     enabled: true,
     showFab: true,            // 页面右下角显示设置按钮
     showArtwork: true,        // 显示专辑封面
-    showTranslation: false,   // SMTC 的「歌词」片段是否带译文
     smtc: {
       sep: ' - ',             // 三栏共用的片段连接符
       title: [defPart('song')],
@@ -77,22 +81,22 @@
     },
     titleCfg: {                // 网页标题
       enabled: false,
-      showTranslation: false,  // 网页标题里的「歌词」片段是否带译文
       sep: ' - ',
       parts: [defPart('song'), defPart('artist'), defPart('site')]
     }
   };
 
-  /* 预设：SMTC 两组、网页标题三组（applyPreset 会连译文开关一起设好） */
+  /* 预设：SMTC 三组、网页标题三组；是否带译文由片段列表里的「翻译」片段体现 */
   const SMTC_PRESETS = [
-    { name: '歌曲名 / 歌手', sep: ' - ', trans: false, title: ['song'], artist: ['artist'], album: ['album'] },
-    { name: '歌词 / 歌曲名 - 歌手', sep: ' - ', trans: false, title: ['lyric'], artist: ['song', 'artist'], album: ['album'] }
+    { name: '歌曲名 / 歌手', sep: ' - ', title: ['song'], artist: ['artist'], album: ['album'] },
+    { name: '歌词 / 歌曲名 - 歌手', sep: ' - ', title: ['lyric'], artist: ['song', 'artist'], album: ['album'] },
+    { name: '歌词 翻译 / 歌曲名 - 歌手', sep: ' - ', title: ['lyric', 'trans'], artist: ['song', 'artist'], album: ['album'] }
   ];
 
   const TITLE_PRESETS = [
-    { name: '歌曲名 - 歌手 - 网站名称', sep: ' - ', trans: false, parts: ['song', 'artist', 'site'] },
-    { name: '歌词(翻译) - 歌曲名 - 歌手', sep: ' - ', trans: true, parts: ['lyric', 'song', 'artist'] },
-    { name: '歌词(翻译)', sep: ' - ', trans: true, parts: ['lyric'] }
+    { name: '歌曲名 - 歌手 - 网站名称', sep: ' - ', parts: ['song', 'artist', 'site'] },
+    { name: '歌词 翻译 - 歌曲名 - 歌手', sep: ' - ', parts: ['lyric', 'trans', 'song', 'artist'] },
+    { name: '歌词 翻译', sep: ' - ', parts: ['lyric', 'trans'] }
   ];
 
   let cfg = readCfg();
@@ -150,6 +154,23 @@
     return o;
   }
 
+  /* v1.3.5 迁移：旧的「启用翻译?」布尔开关 → 片段列表里的「翻译」片段。
+     旧版译文是紧跟在「歌词」片段后面的，所以只在含歌词片段的那一栏插入「翻译」，
+     插在该栏最后一个「歌词」片段之后；该栏没有歌词片段则不动（旧版那样也看不到译文） */
+  function migrateTransFlag(list, flag) {
+    const arr = Array.isArray(list) ? list : [];
+    if (!flag) return arr;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] && arr[i].type === 'trans') return arr;   // 已有翻译片段，不重复插
+    }
+    let at = -1;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] && arr[i].type === 'lyric') at = i;
+    }
+    if (at >= 0) arr.splice(at + 1, 0, defPart('trans'));
+    return arr;
+  }
+
   // 读取时做一次合法性校验
   function normalizeCfg(c) {
     const o = cloneCfg(c);
@@ -164,10 +185,19 @@
       o.smtc.title = [defPart('song')];
       o.smtc.artist = [defPart('artist')];
     }
+    // 旧配置的翻译开关（读旧版本存下来的值）→ 翻译片段
+    const oldTrans = (o.showTranslation === true);
+    const oldTitleTrans = (o.titleCfg.showTranslation === true);
+    if (oldTrans) {
+      o.smtc.title = migrateTransFlag(o.smtc.title, true);
+      o.smtc.artist = migrateTransFlag(o.smtc.artist, true);
+      o.smtc.album = migrateTransFlag(o.smtc.album, true);
+    }
+    if (oldTitleTrans) o.titleCfg.parts = migrateTransFlag(o.titleCfg.parts, true);
+    delete o.showTranslation;
+    delete o.titleCfg.showTranslation;
     if (typeof o.smtc.sep !== 'string') o.smtc.sep = DEF_CFG.smtc.sep;
     if (typeof o.titleCfg.sep !== 'string') o.titleCfg.sep = DEF_CFG.titleCfg.sep;
-    if (typeof o.showTranslation !== 'boolean') o.showTranslation = DEF_CFG.showTranslation;
-    if (typeof o.titleCfg.showTranslation !== 'boolean') o.titleCfg.showTranslation = DEF_CFG.titleCfg.showTranslation;
     return o;
   }
 
@@ -722,7 +752,7 @@
     if (!info.album) info.album = cache.album;
     if (!info.cover) info.cover = upscale(cache.cover);
 
-    /* ---- 播放进度 → 当前歌词（原文/译文分开存，SMTC 与网页标题各自决定要不要译文） ---- */
+    /* ---- 播放进度 → 当前歌词（原文与译文分开存，用不用由片段列表决定） ---- */
     const t = getPlayTime();
     diag.transState = '';
     diag.lineIndex = -1;
@@ -731,14 +761,14 @@
       diag.lineIndex = mi;
       if (mi >= 0) {
         info.lyric = cache.lrc[mi].text;
-        // 译文统一配对好放在 info.lyricTrans 里，用不用由 compose / composeTitle 各自的开关决定
-        // （这样设置面板里切换开关能立刻看到效果，不必先保存）
+        // 译文一律配对好放进 info.lyricTrans：用不用取决于片段列表里有没有「翻译」片段，
+        // 所以这里不做开关判断 —— 面板里增删「翻译」片段能立刻在预览看到效果
         const tr = transFor(mi);
         if (tr) {
           info.lyricTrans = tr;
           diag.transState = 'matched';
         } else {
-          diag.transState = 'none';   // 本句确实没有翻译，不再沿用上一句
+          diag.transState = 'none';   // 本句确实没有翻译，不会沿用上一句
         }
       }
     }
@@ -755,23 +785,16 @@
     return info;
   }
 
-  // 按需把译文拼到原文后面 —— SMTC 与网页标题各用各的开关，互不影响
-  function lyricText(info, wantTrans) {
-    const main = info.lyric || '';
-    if (!wantTrans) return main;
-    const tr = info.lyricTrans || '';
-    if (!tr || tr === main) return main;
-    return main ? (main + ' · ' + tr) : tr;
-  }
-
-  /* 通用片段拼接：按 parts 顺序取值，空片段（如未取到的歌手）自动跳过，
-     避免拼出多余的分隔符 */
-  function joinParts(info, parts, sep, wantTrans) {
+  /* 通用片段拼接：按 parts 顺序取值，空片段（如未取到的歌手、本句无译文）自动跳过，
+     避免拼出多余的分隔符。
+     注意「歌词」只出原文、「翻译」只出译文，两者都是普通片段，位置与前后关系由用户排 */
+  function joinParts(info, parts, sep) {
     const values = {
       song: info.song || '',
       artist: info.artist || '',
       album: info.album || '',
-      lyric: lyricText(info, wantTrans),
+      lyric: info.lyric || '',
+      trans: info.lyricTrans || '',
       site: ''
     };
     const segs = [];
@@ -789,19 +812,18 @@
   function composeSmtc(info, c) {
     const conf = c || cfg;
     const s = conf.smtc || DEF_CFG.smtc;
-    const trans = !!conf.showTranslation;
-    const title = joinParts(info, s.title, s.sep, trans);
+    const title = joinParts(info, s.title, s.sep);
     return {
       title: title || info.song || '网易云音乐',   // 标题为空时兜底歌名，免得卡片空白
-      artist: joinParts(info, s.artist, s.sep, trans),
-      album: joinParts(info, s.album, s.sep, trans)
+      artist: joinParts(info, s.artist, s.sep),
+      album: joinParts(info, s.album, s.sep)
     };
   }
 
   // 网页标题拼接
   function composeTitle(info, tc) {
     if (!tc || !tc.enabled) return '';
-    return joinParts(info, tc.parts, tc.sep, tc.showTranslation);
+    return joinParts(info, tc.parts, tc.sep);
   }
 
   function tick() {
@@ -914,6 +936,7 @@
   let draft = null;     // 编辑中的临时配置
   let els = null;
   let ioMode = '';      // 当前导入/导出弹层的模式
+  let curTab = 'general';   // 当前选项卡（记住用户上次停留的页）
 
   const SEP_PRESETS = [' - ', ' · ', ' | ', ''];
 
@@ -922,161 +945,265 @@
     '*{box-sizing:border-box;margin:0;padding:0}',
     '.mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;',
     '  font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;',
-    '  opacity:0;transition:opacity .18s ease}',
+    '  opacity:0;transition:opacity .2s ease}',
     '.mask.show{opacity:1}',
-    '.card{width:424px;max-width:calc(100vw - 32px);max-height:calc(100vh - 36px);overflow:auto;background:#fff;border-radius:12px;',
-    '  box-shadow:0 18px 48px rgba(0,0,0,.3);transform:translateY(10px) scale(.98);',
-    '  transition:transform .22s cubic-bezier(.2,.9,.3,1)}',
-    '.mask.show .card{transform:none}',
-    '.hd{padding:15px 18px;font-size:15px;font-weight:600;color:#1f1f1f;border-bottom:1px solid #f0f0f0;',
-    '  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fff;z-index:2;border-radius:12px 12px 0 0}',
-    '.x{width:26px;height:26px;border:0;background:transparent;border-radius:6px;cursor:pointer;color:#999;',
-    '  font-size:18px;line-height:1;transition:all .18s}',
-    '.x:hover{background:#f5f5f5;color:#333}',
-    '.bd{padding:12px 18px 4px}',
-    '.row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;color:#333;cursor:pointer;font-size:14px}',
-    '.glabel{font-size:12px;color:#999;margin:10px 0 6px}',
+    '.card{width:800px;max-width:calc(100vw - 40px);height:min(700px,calc(100vh - 48px));display:flex;flex-direction:column;',
+    '  background:#fff;border-radius:14px;box-shadow:0 22px 60px rgba(0,0,0,.32);overflow:hidden;opacity:.5;',
+    '  transform:translateY(16px) scale(.97);',
+    '  transition:transform .26s cubic-bezier(.2,.9,.3,1),opacity .22s ease}',
+    '.mask.show .card{transform:none;opacity:1}',
+    '.hd{padding:15px 20px;font-size:15px;font-weight:600;color:#1f1f1f;border-bottom:1px solid #f0f0f0;flex:none;',
+    '  display:flex;align-items:center;justify-content:space-between;background:#fff}',
+    '.hd .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#ec4141;margin-right:8px;',
+    '  vertical-align:1px;box-shadow:0 0 0 3px rgba(236,65,65,.13)}',
+    '.x{width:28px;height:28px;border:0;background:transparent;border-radius:7px;cursor:pointer;color:#999;',
+    '  font-size:18px;line-height:1;transition:background .18s,color .18s,transform .26s ease}',
+    '.x:hover{background:#f5f5f5;color:#333;transform:rotate(90deg)}',
+    '',
+    '.main{flex:1;min-height:0;display:flex}',
+    '.tabs{width:172px;flex:none;position:relative;padding:12px 10px;background:#fafafa;border-right:1px solid #f0f0f0}',
+    '.pill{position:absolute;left:10px;right:10px;top:0;height:38px;border-radius:9px;background:#fff;',
+    '  border:1px solid #f4e2e2;box-shadow:0 2px 7px rgba(236,65,65,.08);z-index:0;opacity:0;',
+    '  transition:transform .34s cubic-bezier(.32,.72,.24,1),height .34s cubic-bezier(.32,.72,.24,1),opacity .24s}',
+    '.tab{position:relative;z-index:1;display:flex;align-items:center;gap:8px;width:100%;height:38px;padding:0 12px;',
+    '  border:0;background:transparent;border-radius:9px;font:13.5px/1 inherit;color:#6b6b6b;cursor:pointer;',
+    '  text-align:left;transition:color .2s,transform .16s}',
+    '.tab+.tab{margin-top:2px}',
+    '.tab:hover{color:#333}',
+    '.tab:active{transform:scale(.98)}',
+    '.tab.active{color:#ec4141;font-weight:600}',
+    '.tick{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none;opacity:.25;transform:scale(.7);',
+    '  transition:opacity .22s,transform .26s cubic-bezier(.2,.9,.3,1)}',
+    '.tab.active .tick{opacity:1;transform:none}',
+    '.pages{flex:1;min-width:0;overflow:auto;padding:16px 20px 4px}',
+    '.page{display:none}',
+    '.page.active{display:block;animation:pageIn .3s cubic-bezier(.22,.9,.3,1) both}',
+    '@keyframes pageIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}',
+    '.cols{display:grid;grid-template-columns:1fr 232px;gap:16px;align-items:start}',
+    '.col-side{position:sticky;top:-4px}',
+    '',
+    '.row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;color:#333;cursor:pointer;font-size:14px}',
+    '.glabel{font-size:12px;color:#999;margin:12px 0 6px}',
     'select{width:100%;height:34px;border:1px solid #e5e5e5;border-radius:7px;padding:0 8px;background:#fff;',
-    '  color:#333;font-size:13px;outline:none;transition:border-color .18s}',
-    'select:focus{border-color:#ec4141}',
+    '  color:#333;font-size:13px;outline:none;transition:border-color .18s,box-shadow .18s}',
+    'select:focus{border-color:#ec4141;box-shadow:0 0 0 3px rgba(236,65,65,.09)}',
     'input.sw{appearance:none;-webkit-appearance:none;width:38px;height:21px;border-radius:11px;background:#ddd;',
-    '  position:relative;cursor:pointer;transition:background .18s;flex:none;border:0;outline:none}',
+    '  position:relative;cursor:pointer;transition:background .2s;flex:none;border:0;outline:none}',
     'input.sw::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;',
-    '  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .18s}',
+    '  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .22s cubic-bezier(.2,.9,.3,1)}',
     'input.sw:checked{background:#ec4141}',
     'input.sw:checked::after{transform:translateX(17px)}',
-    '.collapse{max-height:0;opacity:0;overflow:hidden;transition:max-height .24s ease,opacity .2s ease}',
-    '.collapse.show{max-height:96px;opacity:1}',
-    '.sep{height:1px;background:#f0f0f0;margin:14px -18px 0}',
-    '.sect{font-size:13px;font-weight:600;color:#333;margin:14px 0 2px}',
-    '.preview{margin:14px 0 6px;padding:11px 12px;border-radius:9px;background:#fafafa;border:1px solid #f0f0f0}',
+    '.sep{height:1px;background:#f0f0f0;margin:16px -20px 0}',
+    '.sect{font-size:13px;font-weight:600;color:#333;margin:14px 0 8px}',
+    '.infobox{border:1px solid #f0f0f0;border-radius:10px;background:#fafafa;padding:4px 12px}',
+    '.irow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;font-size:12.5px;',
+    '  color:#8a8a8a;border-bottom:1px dashed #ededed}',
+    '.irow:last-child{border-bottom:0}',
+    '.irow b{color:#444;font-weight:500}',
+    '.irow code{font:11.5px/1 Consolas,Menlo,monospace;background:#f1f1f1;border-radius:4px;padding:3px 6px;color:#666}',
+    '.preview{margin:14px 0 6px;padding:11px 12px;border-radius:10px;background:#fafafa;border:1px solid #f0f0f0}',
+    '.col-side .preview:first-child{margin-top:0}',
     '.plabel{font-size:12px;color:#999;margin-bottom:8px}',
     '.pbox{background:#2b2b2b;border-radius:8px;padding:9px 12px}',
     '.ptitle{color:#fff;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.partist{color:#b3b3b3;font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:17px}',
     '.palbum{color:#8b8b8b;font-size:11.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:16px}',
-    '.presets{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 4px}',
+    '.ptbox{margin-top:6px;padding:8px 10px;border-radius:8px;background:#fff;border:1px solid #eee;',
+    '  font-size:12px;color:#444;word-break:break-all;line-height:1.6}',
+    '.tabdemo{display:flex;align-items:center;gap:7px;background:#f1f1f1;border-radius:0 0 8px 8px;padding:9px 10px}',
+    '.tabdemo .fav{width:12px;height:12px;border-radius:3px;flex:none;background:linear-gradient(135deg,#ec4141,#ff9090)}',
+    '.tabdemo .tt{font-size:12px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.presets{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 6px}',
     '.chip{height:27px;padding:0 10px;border-radius:14px;border:1px solid #e7e7e7;background:#fafafa;color:#555;',
-    '  font-size:12px;font-family:inherit;cursor:pointer;transition:all .16s}',
+    '  font:12px/1 inherit;cursor:pointer;transition:all .18s}',
     '.chip:hover{border-color:#ec4141;color:#ec4141;background:#fff6f6}',
-    '.chip:active{transform:scale(.97)}',
-    '.mhd{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#666;margin:11px 0 5px}',
+    '.chip:active{transform:scale(.95)}',
+    '.mhd{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#666;margin:12px 0 5px}',
     '.mhint{font-size:11px;color:#c2c2c2}',
-    '.iomask{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.32);border-radius:12px}',
-    '.iomask.show{display:flex}',
-    '.iocard{width:424px;max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;',
-    '  background:#fff;border-radius:12px;box-shadow:0 18px 48px rgba(0,0,0,.3);overflow:auto}',
-    '.ta{width:100%;height:188px;border:1px solid #e5e5e5;border-radius:8px;padding:9px 10px;color:#333;outline:none;',
-    '  resize:vertical;font:12px/1.55 Consolas,Menlo,monospace;transition:border-color .18s}',
-    '.ta:focus{border-color:#ec4141}',
-    '.iohint{min-height:17px;margin-top:7px;font-size:12px;color:#aaa;line-height:1.5}',
-    '.iohint.err{color:#ec4141}',
-    '.iohint.ok{color:#18a058}',
-    '.frags{border:1px solid #eee;border-radius:9px;overflow:hidden;background:#fcfcfc}',
+    '.frags{border:1px solid #eee;border-radius:10px;overflow:hidden;background:#fcfcfc}',
     '.frag{display:flex;align-items:center;gap:8px;padding:7px 10px;background:#fff;border-bottom:1px solid #f2f2f2;',
-    '  cursor:grab;transition:background .15s,opacity .15s}',
+    '  cursor:grab;transition:background .16s,opacity .16s,box-shadow .16s}',
     '.frag:last-child{border-bottom:0}',
     '.frag:hover{background:#fafafa}',
-    '.frag.dragging{opacity:.4;background:#fff6f6}',
+    '.frag.dragging{opacity:.45;background:#fff6f6;box-shadow:inset 0 0 0 1px #f7d5d5}',
+    '.frag-new{animation:fragIn .28s cubic-bezier(.2,.9,.3,1) both}',
+    '@keyframes fragIn{from{opacity:0;transform:translateX(-7px)}to{opacity:1;transform:none}}',
     '.grip{color:#c8c8c8;font-size:13px;letter-spacing:-2px;user-select:none;cursor:grab;flex:none}',
     '.fname{font-size:13px;color:#333;flex:none;min-width:56px}',
     '.ftext{flex:1;min-width:0;height:26px;border:1px solid #e8e8e8;border-radius:6px;padding:0 7px;font-size:12px;',
     '  color:#555;outline:none;cursor:text;transition:border-color .18s}',
     '.ftext:focus{border-color:#ec4141}',
     '.del{width:22px;height:22px;border:0;background:transparent;border-radius:5px;color:#bbb;cursor:pointer;',
-    '  font-size:15px;line-height:1;flex:none;transition:all .15s}',
-    '.del:hover{background:#fdecec;color:#ec4141}',
+    '  font-size:15px;line-height:1;flex:none;transition:all .16s}',
+    '.del:hover{background:#fdecec;color:#ec4141;transform:scale(1.08)}',
     '.addrow{display:flex;gap:8px;margin-top:8px}',
     '.addrow select{flex:1}',
     '.txt{width:100%;height:34px;border:1px solid #e5e5e5;border-radius:7px;padding:0 8px;font-size:13px;',
-    '  color:#333;outline:none;margin-top:8px;transition:border-color .18s}',
-    '.txt:focus{border-color:#ec4141}',
-    '.ptbox{margin-top:6px;padding:7px 10px;border-radius:7px;background:#fff;border:1px solid #eee;',
-    '  font-size:12px;color:#444;word-break:break-all}',
-    '.ft{padding:10px 18px 16px;display:flex;gap:10px;justify-content:flex-end;position:sticky;bottom:0;background:#fff;border-radius:0 0 12px 12px}',
-    '.btn{height:34px;padding:0 16px;border-radius:8px;border:1px solid transparent;font-size:13px;cursor:pointer;transition:all .18s}',
-    '.btn.primary{background:#ec4141;color:#fff}',
-    '.btn.primary:hover{background:#d73535}',
+    '  color:#333;outline:none;margin-top:8px;transition:border-color .18s,box-shadow .18s}',
+    '.txt:focus{border-color:#ec4141;box-shadow:0 0 0 3px rgba(236,65,65,.09)}',
+    '.diag{margin:0 0 6px;padding:12px;border-radius:10px;background:#fbfbfb;border:1px solid #f0f0f0}',
+    '.dbox{margin-top:6px;font-size:12px;color:#555;line-height:1.9;word-break:break-all}',
+    '.tip{margin-top:10px;font-size:12px;color:#aaa;line-height:1.6}',
+    '.hint{margin:6px 0 2px;padding-left:2px;font-size:11.5px;color:#bbb;line-height:1.6}',
+    '',
+    '.ft{padding:11px 18px 14px;display:flex;align-items:center;gap:10px;justify-content:flex-end;flex:none;',
+    '  border-top:1px solid #f4f4f4;background:#fff}',
+    '.ftinfo{margin-right:auto;font-size:11.5px;color:#c4c4c4}',
+    '.btn{height:34px;padding:0 16px;border-radius:8px;border:1px solid transparent;font-size:13px;cursor:pointer;',
+    '  font-family:inherit;transition:all .18s}',
+    '.btn:active{transform:scale(.97)}',
+    '.btn.primary{background:#ec4141;color:#fff;box-shadow:0 3px 10px rgba(236,65,65,.24)}',
+    '.btn.primary:hover{background:#d73535;box-shadow:0 4px 14px rgba(236,65,65,.3)}',
     '.btn.ghost{background:#fff;color:#666;border-color:#e5e5e5}',
-    '.btn.ghost:hover{background:#f7f7f7;color:#333}',
+    '.btn.ghost:hover{background:#f7f7f7;color:#333;border-color:#ddd}',
     '.btn.mini{height:34px;padding:0 14px;background:#f5f5f5;color:#444;border-color:#ececec}',
     '.btn.mini:hover{background:#ececec}',
-    '.diag{margin:14px 0 6px;padding:11px 12px;border-radius:9px;background:#fbfbfb;border:1px solid #f0f0f0}',
-    '.dbox{margin-top:6px;font-size:12px;color:#555;line-height:1.8;word-break:break-all}',
-    '.tip{margin-top:10px;font-size:12px;color:#aaa;line-height:1.55}',
-    '.hint{margin:-2px 0 2px;padding-left:2px;font-size:11.5px;color:#bbb;line-height:1.6}'
+    '',
+    '.iomask{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.34);',
+    '  border-radius:14px}',
+    '.iomask.show{display:flex}',
+    '.iocard{width:560px;max-width:calc(100vw - 40px);max-height:calc(100vh - 60px);display:flex;flex-direction:column;',
+    '  background:#fff;border-radius:14px;box-shadow:0 22px 60px rgba(0,0,0,.32);overflow:auto;',
+    '  animation:cardIn .26s cubic-bezier(.2,.9,.3,1) both}',
+    '@keyframes cardIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}',
+    '.bd{padding:12px 18px 4px}',
+    '.ta{width:100%;height:210px;border:1px solid #e5e5e5;border-radius:8px;padding:9px 10px;color:#333;outline:none;',
+    '  resize:vertical;font:12px/1.55 Consolas,Menlo,monospace;transition:border-color .18s}',
+    '.ta:focus{border-color:#ec4141}',
+    '.iohint{min-height:17px;margin-top:7px;font-size:12px;color:#aaa;line-height:1.5}',
+    '.iohint.err{color:#ec4141}',
+    '.iohint.ok{color:#18a058}',
+    '',
+    '@media (max-width:780px){',
+    '  .card{width:calc(100vw - 24px);height:min(88vh,calc(100vh - 24px))}',
+    '  .main{flex-direction:column}',
+    '  .tabs{width:100%;display:flex;gap:6px;padding:9px 12px;border-right:0;border-bottom:1px solid #f0f0f0;overflow-x:auto}',
+    '  .pill{display:none}',
+    '  .tab{width:auto;flex:none;padding:0 14px;border:1px solid transparent}',
+    '  .tab+.tab{margin-top:0}',
+    '  .tab.active{background:#fff;border-color:#f4e2e2;box-shadow:0 1px 4px rgba(236,65,65,.08)}',
+    '  .pages{padding:14px 14px 4px}',
+    '  .cols{grid-template-columns:1fr}',
+    '  .col-side{position:static}',
+    '  .sep{margin-left:-14px;margin-right:-14px}',
+    '}'
   ].join('\n');
+
 
   const HTML = [
     '<div class="mask" data-role="mask">',
     '  <div class="card">',
-    '    <div class="hd"><span>网易云音乐设置增强 NCMWSE</span><button class="x" data-role="close" title="关闭">&times;</button></div>',
-    '    <div class="bd">',
-    '      <label class="row"><span>启用显示增强</span><input class="sw" type="checkbox" data-k="enabled"></label>',
-    '      <label class="row"><span>显示右下角设置按钮</span><input class="sw" type="checkbox" data-k="showFab"></label>',
-    '      <label class="row"><span>显示专辑封面</span><input class="sw" type="checkbox" data-k="showArtwork"></label>',
+    '    <div class="hd">',
+    '      <span><i class="dot"></i>网易云音乐设置增强 NCMWSE</span>',
+    '      <button class="x" data-role="close" title="关闭">&times;</button>',
+    '    </div>',
+    '    <div class="main">',
+    '      <nav class="tabs" data-role="tabs">',
+    '        <div class="pill" data-role="pill"></div>',
+    '        <button class="tab" type="button" data-tab="general"><i class="tick"></i>常规</button>',
+    '        <button class="tab" type="button" data-tab="smtc"><i class="tick"></i>系统媒体</button>',
+    '        <button class="tab" type="button" data-tab="title"><i class="tick"></i>网页标题</button>',
+    '        <button class="tab" type="button" data-tab="diag"><i class="tick"></i>诊断信息</button>',
+    '      </nav>',
+    '      <div class="pages" data-role="pages">',
     '',
-    '      <div class="sep"></div>',
-    '      <div class="sect">系统媒体（SMTC）</div>',
-    '      <div class="glabel">快速预设</div>',
-    '      <div class="presets" data-role="presetsSmtc"></div>',
-    '      <div data-role="smtcMods"></div>',
-    '      <div class="glabel">片段连接符（三栏共用）</div>',
-    '      <select data-k="smtcSep">',
-    '        <option value=" - ">空格 - 空格</option>',
-    '        <option value=" · ">· 间隔点</option>',
-    '        <option value=" | ">| 竖线</option>',
-    '        <option value="">（无分隔）</option>',
-    '        <option value="__custom__">自定义…</option>',
-    '      </select>',
-    '      <input class="txt" data-role="smtcSepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
-    '      <div class="collapse" data-role="transRow">',
-    '        <label class="row" style="padding-top:10px"><span>启用翻译?（系统媒体）</span><input class="sw" type="checkbox" data-k="showTranslation"></label>',
-    '        <div class="hint">译文按时间戳与本句原文配对：只有本句确实有译文时才显示，中英夹杂的歌曲唱到无译文的那句不会沿用上一句。只影响系统媒体/SMTC。</div>',
-    '      </div>',
-    '      <div class="preview">',
-    '        <div class="plabel">实时预览 · 系统媒体卡片</div>',
-    '        <div class="pbox">',
-    '          <div class="ptitle" data-role="pv1">—</div>',
-    '          <div class="partist" data-role="pv2">—</div>',
-    '          <div class="palbum" data-role="pv3">—</div>',
-    '        </div>',
-    '      </div>',
+    '        <section class="page" data-page="general">',
+    '          <label class="row"><span>启用显示增强</span><input class="sw" type="checkbox" data-k="enabled"></label>',
+    '          <label class="row"><span>显示右下角设置按钮</span><input class="sw" type="checkbox" data-k="showFab"></label>',
+    '          <label class="row"><span>显示专辑封面</span><input class="sw" type="checkbox" data-k="showArtwork"></label>',
+    '          <div class="sep"></div>',
+    '          <div class="sect">运行信息</div>',
+    '          <div class="infobox">',
+    '            <div class="irow"><span>脚本版本</span><b>NCMWSE v' + VER + '</b></div>',
+    '            <div class="irow"><span>设置入口</span><b>右下角齿轮按钮 · <code>Ctrl + Alt + S</code></b></div>',
+    '            <div class="irow"><span>生效范围</span><b>music.163.com</b></div>',
+    '          </div>',
+    '          <div class="tip">修改后点「保存并关闭」才会生效。需要页面处于播放状态，系统媒体控制才会出现；歌词不显示时到「诊断信息」页看卡在哪一步。</div>',
+    '        </section>',
     '',
-    '      <div class="sep"></div>',
-    '      <div class="sect">网页标题</div>',
-    '      <label class="row"><span>自定义网页标题</span><input class="sw" type="checkbox" data-k="titleEnabled"></label>',
-    '      <div class="glabel">快速预设</div>',
-    '      <div class="presets" data-role="presetsTitle"></div>',
-    '      <div class="mhd"><span>标题栏</span><span class="mhint">按住拖动排序，点 × 删除</span></div>',
-    '      <div class="frags" data-role="frags_pageTitle"></div>',
-    '      <div class="addrow">',
-    '        <select data-role="addsel_pageTitle"></select>',
-    '        <button class="btn mini" data-role="addbtn_pageTitle">添加片段</button>',
-    '      </div>',
-    '      <label class="row" style="margin-top:10px"><span>启用翻译?（网页标题）</span><input class="sw" type="checkbox" data-k="titleTrans"></label>',
-    '      <div class="hint" style="margin-bottom:6px">只影响网页标题里的「歌词」片段，与系统媒体那个开关相互独立。</div>',
-    '      <div class="glabel">片段连接符</div>',
-    '      <select data-k="titleSep">',
-    '        <option value=" - ">空格 - 空格</option>',
-    '        <option value=" · ">· 间隔点</option>',
-    '        <option value=" | ">| 竖线</option>',
-    '        <option value="">（无分隔）</option>',
-    '        <option value="__custom__">自定义…</option>',
-    '      </select>',
-    '      <input class="txt" data-role="sepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
-    '      <div class="preview">',
-    '        <div class="plabel">网页标题预览</div>',
-    '        <div class="ptbox" data-role="ptitle">—</div>',
-    '      </div>',
+    '        <section class="page" data-page="smtc">',
+    '          <div class="cols">',
+    '            <div>',
+    '              <div class="glabel">快速预设</div>',
+    '              <div class="presets" data-role="presetsSmtc"></div>',
+    '              <div class="hint">「翻译」和歌曲名/歌手一样是可拖拽的片段：把它加进某一栏，就显示当前这句歌词的译文。译文按时间戳与本句原文配对 —— 本句没有译文时该片段为空、不会沿用上一句。</div>',
+    '              <div data-role="smtcMods"></div>',
+    '              <div class="glabel">片段连接符（三栏共用）</div>',
+    '              <select data-k="smtcSep">',
+    '                <option value=" - ">空格 - 空格</option>',
+    '                <option value=" · ">· 间隔点</option>',
+    '                <option value=" | ">| 竖线</option>',
+    '                <option value="">（无分隔）</option>',
+    '                <option value="__custom__">自定义…</option>',
+    '              </select>',
+    '              <input class="txt" data-role="smtcSepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
+    '            </div>',
+    '            <aside class="col-side">',
+    '              <div class="preview">',
+    '                <div class="plabel">实时预览 · 系统媒体卡片</div>',
+    '                <div class="pbox">',
+    '                  <div class="ptitle" data-role="pv1">—</div>',
+    '                  <div class="partist" data-role="pv2">—</div>',
+    '                  <div class="palbum" data-role="pv3">—</div>',
+    '                </div>',
+    '              </div>',
+    '            </aside>',
+    '          </div>',
+    '        </section>',
     '',
-    '      <div class="diag">',
-    '        <div class="plabel">诊断信息（歌词不显示时看这里）</div>',
-    '        <div class="dbox" data-role="diag">—</div>',
+    '        <section class="page" data-page="title">',
+    '          <div class="cols">',
+    '            <div>',
+    '              <label class="row"><span>自定义网页标题</span><input class="sw" type="checkbox" data-k="titleEnabled"></label>',
+    '              <div class="glabel">快速预设</div>',
+    '              <div class="presets" data-role="presetsTitle"></div>',
+    '              <div class="mhd"><span>标题栏</span><span class="mhint">按住拖动排序，点 × 删除</span></div>',
+    '              <div class="frags" data-role="frags_pageTitle"></div>',
+    '              <div class="addrow">',
+    '                <select data-role="addsel_pageTitle"></select>',
+    '                <button class="btn mini" data-role="addbtn_pageTitle">添加片段</button>',
+    '              </div>',
+    '              <div class="glabel">片段连接符</div>',
+    '              <select data-k="titleSep">',
+    '                <option value=" - ">空格 - 空格</option>',
+    '                <option value=" · ">· 间隔点</option>',
+    '                <option value=" | ">| 竖线</option>',
+    '                <option value="">（无分隔）</option>',
+    '                <option value="__custom__">自定义…</option>',
+    '              </select>',
+    '              <input class="txt" data-role="sepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
+    '            </div>',
+    '            <aside class="col-side">',
+    '              <div class="preview">',
+    '                <div class="plabel">网页标题预览</div>',
+    '                <div class="ptbox" data-role="ptitle">—</div>',
+    '              </div>',
+    '              <div class="preview">',
+    '                <div class="plabel">标签页示意</div>',
+    '                <div class="tabdemo"><i class="fav"></i><span class="tt" data-role="ptitle2">—</span></div>',
+    '              </div>',
+    '            </aside>',
+    '          </div>',
+    '        </section>',
+    '',
+    '        <section class="page" data-page="diag">',
+    '          <div class="diag">',
+    '            <div class="plabel">实时诊断（播放时每 300ms 刷新）</div>',
+    '            <div class="dbox" data-role="diag">—</div>',
+    '          </div>',
+    '          <div class="sect">怎么看</div>',
+    '          <div class="tip">',
+    '            · <b>歌曲 ID 未获取到</b> → 歌曲链接与搜索兜底都没命中，歌词自然拿不到。<br>',
+    '            · <b>歌词未获取到但 ID 正常</b> → 这首歌本身可能没歌词（纯音乐）。<br>',
+    '            · <b>播放进度未取到</b> → 播放栏结构可能变了，反馈给我补选择器。<br>',
+    '            · <b>全都正常但媒体卡片没歌词</b> → 到「系统媒体」页确认那一栏里有「歌词」片段。',
+    '          </div>',
+    '        </section>',
+    '',
     '      </div>',
-    '      <div class="tip">入口：页面右下角齿轮按钮 · 快捷键 Ctrl+Alt+S · 脚本管理器菜单「显示设置」。<br>提示：需要页面处于播放状态，系统媒体控制才会出现。</div>',
     '    </div>',
     '    <div class="ft">',
+    '      <span class="ftinfo">NCMWSE v' + VER + '</span>',
     '      <button class="btn ghost" data-role="reset">恢复默认</button>',
     '      <button class="btn ghost" data-role="export">导出</button>',
     '      <button class="btn ghost" data-role="import">导入</button>',
@@ -1104,11 +1231,11 @@
     '</div>'
   ].join('\n');
 
+
   /* ---- draft 键值映射（部分设置项嵌在 titleCfg / smtc 里） ---- */
   function keyGet(k) {
     if (!draft) return undefined;
     if (k === 'titleEnabled') return draft.titleCfg.enabled;
-    if (k === 'titleTrans') return draft.titleCfg.showTranslation;
     if (k === 'titleSep') return draft.titleCfg.sep;
     if (k === 'smtcSep') return draft.smtc.sep;
     return draft[k];
@@ -1117,7 +1244,6 @@
   function keySet(k, v) {
     if (!draft) return;
     if (k === 'titleEnabled') draft.titleCfg.enabled = v;
-    else if (k === 'titleTrans') draft.titleCfg.showTranslation = v;
     else if (k === 'titleSep') draft.titleCfg.sep = v;
     else if (k === 'smtcSep') draft.smtc.sep = v;
     else draft[k] = v;
@@ -1278,8 +1404,8 @@
     draft.smtc.title = partsOf(ps.title);
     draft.smtc.artist = partsOf(ps.artist);
     draft.smtc.album = partsOf(ps.album);
-    draft.showTranslation = !!ps.trans;
     fillPanel();
+    flashRows(['smtcTitle', 'smtcArtist', 'smtcAlbum'], true);
     refreshPreview();
   }
 
@@ -1288,8 +1414,8 @@
     draft.titleCfg.enabled = true;
     draft.titleCfg.sep = ps.sep;
     draft.titleCfg.parts = partsOf(ps.parts);
-    draft.titleCfg.showTranslation = !!ps.trans;
     fillPanel();
+    flashRows(['pageTitle'], true);
     refreshPreview();
   }
 
@@ -1412,13 +1538,18 @@
 
     els = {
       mask: shadow.querySelector('[data-role="mask"]'),
+      tabs: shadow.querySelector('[data-role="tabs"]'),
+      pill: shadow.querySelector('[data-role="pill"]'),
+      tabBtns: shadow.querySelectorAll('.tab'),
+      pages: shadow.querySelectorAll('.page'),
+      pagesBox: shadow.querySelector('[data-role="pages"]'),
       pv1: shadow.querySelector('[data-role="pv1"]'),
       pv2: shadow.querySelector('[data-role="pv2"]'),
       pv3: shadow.querySelector('[data-role="pv3"]'),
       ptitle: shadow.querySelector('[data-role="ptitle"]'),
+      ptitle2: shadow.querySelector('[data-role="ptitle2"]'),
       sepCustom: shadow.querySelector('[data-role="sepCustom"]'),
       smtcSepCustom: shadow.querySelector('[data-role="smtcSepCustom"]'),
-      transRow: shadow.querySelector('[data-role="transRow"]'),
       diag: shadow.querySelector('[data-role="diag"]'),
       presetsSmtc: shadow.querySelector('[data-role="presetsSmtc"]'),
       presetsTitle: shadow.querySelector('[data-role="presetsTitle"]'),
@@ -1458,6 +1589,7 @@
           arr.push(defPart(sel.value));
           ctx.set(draft, arr);
           renderMod(mod.id);
+          flashRows([mod.id], false);   // 只让新加的那行滑入
           refreshPreview();
         });
       }
@@ -1465,6 +1597,11 @@
 
     renderPresets(els.presetsSmtc, SMTC_PRESETS, applySmtcPreset);
     renderPresets(els.presetsTitle, TITLE_PRESETS, applyTitlePreset);
+
+    // 选项卡切换
+    Array.prototype.forEach.call(els.tabBtns, function (b) {
+      b.addEventListener('click', function () { showTab(b.getAttribute('data-tab')); });
+    });
 
     els.mask.addEventListener('click', function (e) {
       if (e.target === els.mask || (e.target.getAttribute && e.target.getAttribute('data-role') === 'close')) closePanel();
@@ -1489,7 +1626,6 @@
         } else {
           keySet(k, (el.type === 'checkbox') ? el.checked : el.value);
         }
-        if (k === 'showTranslation') updateTransVisibility();
         refreshPreview();
       });
     });
@@ -1572,6 +1708,11 @@
 
     const root = document.documentElement || document.body;
     if (root) root.appendChild(host);
+
+    // 窗口尺寸变化时（含窄屏切换为横向选项卡）重新校准指示块
+    window.addEventListener('resize', function () {
+      if (host && host.style.display !== 'none') movePill();
+    });
   }
 
   function fillPanel() {
@@ -1597,19 +1738,69 @@
       else el.value = v;
     });
     renderMods();
-    updateTransVisibility();
   }
 
-  function hasLyricPart(arr) {
-    return (arr || []).some(function (p) { return p && p.type === 'lyric'; });
+  /* ========================== 选项卡 ========================== */
+
+  // 切换选项卡：滑动指示块 + 页面淡入上移
+  function showTab(id) {
+    if (!els || !els.tabBtns) return;
+    let ok = false;
+    Array.prototype.forEach.call(els.tabBtns, function (b) {
+      if (b.getAttribute('data-tab') === id) ok = true;
+    });
+    if (!ok) id = 'general';
+    curTab = id;
+
+    Array.prototype.forEach.call(els.tabBtns, function (b) {
+      const on = b.getAttribute('data-tab') === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+
+    // 先摘掉 active 再强制重排，保证每次切页动画都会重播
+    Array.prototype.forEach.call(els.pages, function (p) {
+      const on = p.getAttribute('data-page') === id;
+      p.classList.remove('active');
+      if (on) {
+        void p.offsetWidth;
+        p.classList.add('active');
+      }
+    });
+
+    if (els.pagesBox) els.pagesBox.scrollTop = 0;
+    movePill();
   }
 
-  // 「启用翻译?（系统媒体）」只在 SMTC 有哪一栏用到「歌词」片段时才展示
-  function updateTransVisibility() {
-    if (!els || !els.transRow || !draft) return;
-    const s = draft.smtc || {};
-    const show = hasLyricPart(s.title) || hasLyricPart(s.artist) || hasLyricPart(s.album);
-    els.transRow.classList.toggle('show', show);
+  // 让白色指示块滑到当前选项卡的位置（宽高随选项卡量取）
+  function movePill() {
+    const pill = els && els.pill;
+    if (!pill) return;
+    let act = null;
+    Array.prototype.forEach.call(els.tabBtns || [], function (b) {
+      if (!act && b.classList.contains('active')) act = b;
+    });
+    const h = act ? act.offsetHeight : 0;
+    if (!act || !h) { pill.style.opacity = '0'; return; }   // 面板未显示时量不到尺寸
+    pill.style.height = h + 'px';
+    pill.style.transform = 'translateY(' + act.offsetTop + 'px)';
+    pill.style.opacity = '1';
+  }
+
+  // 让某些模块的片段行依次滑入（套用预设时用），stagger=true 时逐行错开
+  function flashRows(ids, stagger) {
+    if (!els) return;
+    (ids || []).forEach(function (id) {
+      const ctx = fragCtx[id];
+      if (!ctx || !ctx.box) return;
+      const rows = ctx.box.querySelectorAll('.frag');
+      for (let i = 0; i < rows.length; i++) {
+        rows[i].classList.remove('frag-new');
+        void rows[i].offsetWidth;
+        rows[i].style.animationDelay = stagger ? (i * 32) + 'ms' : '0ms';
+        rows[i].classList.add('frag-new');
+      }
+    });
   }
 
   function fillPreview(info, c) {
@@ -1617,7 +1808,9 @@
     els.pv1.textContent = meta.title || '—';
     els.pv2.textContent = meta.artist || '—';
     els.pv3.textContent = meta.album || '—';
-    els.ptitle.textContent = composeTitle(info, c.titleCfg) || '—';
+    const pt = composeTitle(info, c.titleCfg) || '';
+    els.ptitle.textContent = pt || '—';
+    if (els.ptitle2) els.ptitle2.textContent = pt || '—';
   }
 
   function refreshPreview() {
@@ -1654,13 +1847,24 @@
     fillPanel();
     refreshPreview();
     host.style.display = '';
-    requestAnimationFrame(function () { els.mask.classList.add('show'); });
+
+    // 淡入 + 恢复上次停留的选项卡。用 rAF 让过渡有起始帧可动；
+    // 但标签页在后台时 rAF 会被浏览器暂停，因此用定时器兜底，保证面板一定会出现。
+    let shown = false;
+    const show = function () {
+      if (shown || !host || !els) return;
+      shown = true;
+      els.mask.classList.add('show');
+      showTab(curTab);
+    };
+    requestAnimationFrame(show);
+    setTimeout(show, 60);
   }
 
   function closePanel() {
     if (!host) return;
     els.mask.classList.remove('show');
-    setTimeout(function () { if (host) host.style.display = 'none'; }, 180);
+    setTimeout(function () { if (host) host.style.display = 'none'; }, 190);
   }
 
   /* ========================== 菜单入口 ========================== */
