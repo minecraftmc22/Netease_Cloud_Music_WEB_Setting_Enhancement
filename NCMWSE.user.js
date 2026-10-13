@@ -2,8 +2,8 @@
 // @name         网易云音乐设置增强(NCMWSE)
 // @name:en      Netease Cloud Music WEB Setting Enhancement
 // @namespace    https://github.com/minecraftmc22/Netease_Cloud_Music_WEB_Setting_Enhancement
-// @version      1.3.6
-// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。设置面板采用选项卡布局：SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/翻译/专辑/网站名称），带快速预设、歌词时间戳配对、配置导入导出与诊断信息
+// @version      1.3.7
+// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。设置面板采用选项卡布局：SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/翻译/专辑/网站名称），带快速预设、歌词延迟调节（自动校准/手动偏移）、歌词时间戳配对、配置导入导出与诊断信息
 // @description:en  Detect the song playing on Netease Cloud Music web player, sync "song / artist" or "current lyric / song-artist" to Windows SMTC, and customize the page title with drag-and-drop segments.
 // @author       Minecraftmc22
 // @license      MIT
@@ -39,8 +39,12 @@
    *      位置随意（歌词 - 翻译、翻译 - 歌词、单独一栏都行）；
    *      本句没有译文时该片段为空并自动跳过，不会沿用上一句。
    * 4) 配置可导出为 JSON（复制或下载），也能从粘贴内容 / 文件导入。
+   * 5) 歌词同步：歌词比声音慢/快时可以调偏移 ——
+   *      「自动」把行切换精确排期到时间戳那一刻（消掉主循环 300ms 间隔的延迟），
+   *        并在能读到页面歌词时以页面歌词为基准自动微调；
+   *      「手动」用滑杆加减偏移量，用来抵消系统媒体卡片那侧的渲染延迟。
    *
-   * 设置面板：左侧选项卡（常规 / 系统媒体 / 网页标题 / 诊断信息）切换，
+   * 设置面板：左侧选项卡（常规 / 歌词同步 / 系统媒体 / 网页标题 / 诊断信息）切换，
    *      每个版块一页；切换时指示块滑动 + 页面淡入上移，套用预设时片段逐行滑入。
    * ========================================================================= */
 
@@ -50,7 +54,7 @@
   /* ============================ 配置 ============================ */
 
   const CFG_KEY = 'ncm_smtc_cfg';
-  const VER = '1.3.6';
+  const VER = '1.3.7';
 
   // 可用的片段类型（「翻译」也是片段：放在哪、和谁拼，全由片段顺序决定）
   const PART_META = {
@@ -68,11 +72,27 @@
     return { type: type, text: (m && m.hasText) ? (m.def || '') : '' };
   }
 
+  /* 歌词偏移的可调范围（秒）：一般不会超过 1 秒，留到 3 秒足够应付各种场景 */
+  const OFF_MAX = 3;
+
+  function clampOffset(v) {
+    let n = Number(v);
+    if (!isFinite(n)) n = 0;
+    if (n > OFF_MAX) n = OFF_MAX;
+    if (n < -OFF_MAX) n = -OFF_MAX;
+    // 保留两位小数，避免滑杆浮点误差写进配置
+    return Math.round(n * 100) / 100;
+  }
+
   // 四个可编辑的「片段模块」：SMTC 的标题栏/歌手栏/专辑栏 + 网页标题栏
   const DEF_CFG = {
     enabled: true,
     showFab: true,            // 页面右下角显示设置按钮
     showArtwork: true,        // 显示专辑封面
+    lyric: {
+      sync: 'auto',           // 'auto' | 'manual' —— 歌词延迟调节方式
+      offset: 0               // 手动偏移（秒）：正 = 歌词提前显示，负 = 延后
+    },
     smtc: {
       sep: ' - ',             // 三栏共用的片段连接符
       title: [defPart('song')],
@@ -143,6 +163,7 @@
   function cloneCfg(c) {
     const src = migrateCfg(c);
     const o = Object.assign({}, DEF_CFG, src);
+    o.lyric = Object.assign({}, DEF_CFG.lyric, src.lyric || {});
     const sm = Object.assign({}, DEF_CFG.smtc, src.smtc || {});
     sm.title = cloneParts(sm.title);
     sm.artist = cloneParts(sm.artist);
@@ -198,6 +219,9 @@
     delete o.titleCfg.showTranslation;
     if (typeof o.smtc.sep !== 'string') o.smtc.sep = DEF_CFG.smtc.sep;
     if (typeof o.titleCfg.sep !== 'string') o.titleCfg.sep = DEF_CFG.titleCfg.sep;
+    // 歌词同步：模式只认 auto / manual，偏移量限制在 ±OFF_MAX 秒内
+    if (o.lyric.sync !== 'auto' && o.lyric.sync !== 'manual') o.lyric.sync = DEF_CFG.lyric.sync;
+    o.lyric.offset = clampOffset(o.lyric.offset);
     return o;
   }
 
@@ -425,7 +449,9 @@
   const diag = {
     song: '', artist: '', id: '', idFrom: '',
     lyricRows: 0, transRows: 0, time: null, timeSrc: 'none',
-    lineIndex: -1, transState: ''
+    lineIndex: -1, transState: '',
+    rawTime: null,           // 原始播放进度（未加偏移）
+    offset: 0                // 当前生效的歌词偏移（秒）
   };
 
   function esc(s) {
@@ -672,6 +698,171 @@
     return '';
   }
 
+  /* ================= 歌词同步：自动校准 / 手动偏移 =================
+     延迟从哪来：① 主循环最快 300ms 一轮，行切换最多晚 300ms 才被感知；
+                 ② 系统媒体卡片（Windows 侧）自身还有几百毫秒渲染延迟，脚本观测不到。
+     对策：①「自动」——把歌词切换精确排期到行时间戳那一刻，消掉主循环间隔带来的延迟；
+                      能读到网易云页面歌词时，再以页面歌词为基准做微调；
+           ②「手动」——滑杆直接加减偏移量，用来抵消系统媒体卡片那一侧的延迟。 */
+
+  let autoOffset = 0;          // 自动模式下生效的偏移（秒，正 = 提前）
+  const AUTO_CAP = 21;         // 偏移样本窗口大小（取中位数，抗个别抖动）
+  const autoSamples = [];      // 最近的偏移样本
+  let autoSeenIdx = -1;        // 上一次看到的「页面歌词行」下标
+  let autoSongId = '';         // 采样所属歌曲 id
+  let autoCount = 0;           // 累计有效样本数
+  let autoFrom = '';           // 'site' 表示已能读到页面歌词
+
+  const SITE_LYRIC_SEL = [
+    '.m-lyric-body p',
+    '#lyric-content p',
+    '.m-lyric-body .m-lyric-item',
+    '.m-playbar .words .lrc p',
+    '#g_player .lyric p'
+  ];
+
+  function normLyric(s) {
+    return String(s || '')
+      .replace(/\s+/g, '')
+      .replace(/^[·•\-–—]+/, '')
+      .replace(/[·•\-–—]+$/, '');
+  }
+
+  function nodeVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    let r = null;
+    try { r = el.getBoundingClientRect(); } catch (e) { return false; }
+    return !!(r && r.width > 0 && r.height > 0);
+  }
+
+  /* 读「网易云页面上正显示的那句歌词」：
+     先找带选中类的行（绝大多数播放器都会给当前行上类），
+     没有的话退化为「最靠近歌词框中线的那一行」。 */
+  function siteLyricText() {
+    let out = '';
+    eachDoc(function (d) {
+      if (out) return;
+      for (let s = 0; s < SITE_LYRIC_SEL.length && !out; s++) {
+        let list = null;
+        try { list = d.querySelectorAll(SITE_LYRIC_SEL[s]); } catch (e) { list = null; }
+        if (!list || list.length < 3) continue;      // 歌词列表不可能只有两三行
+        for (let i = 0; i < list.length; i++) {      // ① 选中行
+          const cls = String(list[i].className || '');
+          if (/(^|[\s_-])(z-sel|sel|active|current|on)([\s_-]|$)/i.test(cls)) {
+            const v = normLyric(list[i].textContent);
+            if (v) { out = v; return; }
+          }
+        }
+        const box = list[0].parentNode;              // ② 歌词框中线那一行
+        if (!box || !nodeVisible(box)) continue;
+        const br = box.getBoundingClientRect();
+        const cy = br.top + br.height / 2;
+        let best = -1, bd = Infinity;
+        for (let i = 0; i < list.length; i++) {
+          if (!nodeVisible(list[i])) continue;
+          const r = list[i].getBoundingClientRect();
+          const dd = Math.abs(r.top + r.height / 2 - cy);
+          if (dd < bd) { bd = dd; best = i; }
+        }
+        if (best >= 0) out = normLyric(list[best].textContent);
+      }
+    });
+    return out;
+  }
+
+  /* 这句页面歌词对应我们 lrc 里的第几行。
+     副歌会重复出现同一句，这里取时间上最接近当前进度的那一条，避免认错行。 */
+  function lyricIdxOf(text, t) {
+    const n = normLyric(text);
+    if (!n || !cache.lrc.length) return -1;
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < cache.lrc.length; i++) {
+      if (normLyric(cache.lrc[i].text) !== n) continue;
+      const dd = Math.abs(cache.lrc[i].time - (t == null ? 0 : t));
+      if (dd < bd) { bd = dd; best = i; }
+    }
+    return best;
+  }
+
+  function resetAuto(id) {
+    if (!id || autoSongId === id) return;
+    autoSongId = id;
+    autoSamples.length = 0;
+    autoSeenIdx = -1;
+    autoCount = 0;
+    autoOffset = 0;
+    autoFrom = '';
+  }
+
+  /* 采样点选在「页面歌词刚跳行的瞬间」：那一刻页面认为新行应该开始了，
+     而我们读到的播放进度与它同源，两者之差就是要补偿的偏移量。
+     多个样本取中位数，个别抖动就不会把偏移带偏。 */
+  function autoCalibrate(raw) {
+    if (raw == null || !cache.lrc.length) return;
+    const txt = siteLyricText();
+    if (!txt) return;
+    const idx = lyricIdxOf(txt, raw);
+    if (idx < 0) return;                     // 页面歌词与我们的 lrc 对不上，放弃本次采样
+    autoFrom = 'site';
+    if (idx === autoSeenIdx) return;         // 同一行内不重复采样
+    const first = (autoSeenIdx < 0);
+    autoSeenIdx = idx;
+    if (first) return;                       // 第一次只记行号：不知道它是何时切过来的
+    const d = cache.lrc[idx].time - raw;
+    if (Math.abs(d) > 1.5) return;           // 差得离谱，多半是匹配错了行
+    autoCount++;
+    autoSamples.push(d);
+    if (autoSamples.length > AUTO_CAP) autoSamples.shift();
+    if (autoSamples.length < 3) return;      // 样本太少先不动，避免刚唱两句就乱跳
+    const s = autoSamples.slice().sort(function (a, b) { return a - b; });
+    autoOffset = clampOffset(s[(s.length - 1) >> 1]);
+  }
+
+  /* 给定配置下最终生效的偏移量（秒） */
+  function offsetOf(c) {
+    const lc = (c && c.lyric) || DEF_CFG.lyric;
+    if (lc.sync === 'manual') return clampOffset(lc.offset);
+    return clampOffset(autoOffset);
+  }
+
+  function fmtOffset(v) {
+    const n = clampOffset(v);
+    if (Math.abs(n) < 0.005) return '无偏移';
+    return (n > 0 ? '提前 ' : '延后 ') + Math.abs(n).toFixed(2) + ' 秒';
+  }
+
+  /* 按给定配置的偏移重新定位歌词。面板里拖滑杆要立刻看到效果，
+     所以不能只用主循环那份（它是按已保存的 cfg 定位的）。 */
+  function applyLyricOffset(info, c) {
+    const raw = diag.rawTime;
+    if (raw == null || !cache.lrc.length) return info;
+    if (info && info.id && cache.id !== info.id) return info;
+    const mi = findIndex(cache.lrc, raw + offsetOf(c));
+    const o = Object.assign({}, info);
+    if (mi < 0) {
+      o.lyric = '';
+      o.lyricTrans = '';
+      return o;
+    }
+    o.lyric = cache.lrc[mi].text;
+    o.lyricTrans = transFor(mi);
+    return o;
+  }
+
+  /* ---- 精确排期：在下一行的时间戳那一刻立刻刷新，而不是等下一次 300ms 轮询 ---- */
+  let lineTimer = null;
+
+  function scheduleLine() {
+    if (lineTimer) { clearTimeout(lineTimer); lineTimer = null; }
+    const raw = diag.time;
+    if (raw == null || diag.lineIndex < 0 || !cache.lrc.length) return;
+    const next = cache.lrc[diag.lineIndex + 1];
+    if (!next) return;
+    const wait = next.time - (raw + offsetOf(cfg));
+    if (!(wait > 0.08) || wait > 5) return;   // 已在行尾或隔得太远就不排
+    lineTimer = setTimeout(function () { lineTimer = null; tick(); }, Math.max(25, wait * 1000 - 30));
+  }
+
   function ensureSongData(id) {
     if (!id) return;
     if (cache.loading === id) return;                       // 请求中
@@ -747,17 +938,20 @@
       else requestSongId(info.song, info.artist);
     }
     info.id = id;
-    if (id) ensureSongData(id);
+    if (id) { resetAuto(id); ensureSongData(id); }
 
     if (!info.album) info.album = cache.album;
     if (!info.cover) info.cover = upscale(cache.cover);
 
-    /* ---- 播放进度 → 当前歌词（原文与译文分开存，用不用由片段列表决定） ---- */
+    /* ---- 播放进度 → 当前歌词（先叠加歌词偏移，再做时间戳定位） ---- */
     const t = getPlayTime();
+    const off = offsetOf(cfg);
+    diag.rawTime = t;
+    diag.offset = off;
     diag.transState = '';
     diag.lineIndex = -1;
     if (t != null && id && cache.id === id && cache.lrc.length) {
-      const mi = findIndex(cache.lrc, t);
+      const mi = findIndex(cache.lrc, t + off);
       diag.lineIndex = mi;
       if (mi >= 0) {
         info.lyric = cache.lrc[mi].text;
@@ -772,6 +966,8 @@
         }
       }
     }
+    // 自动模式：以页面歌词为基准微调偏移（拿不到页面歌词时静默跳过）
+    if (cfg.lyric.sync === 'auto') autoCalibrate(t);
 
     /* ---- 诊断快照 ---- */
     diag.song = info.song;
@@ -849,6 +1045,7 @@
         }
       }
       restoreSiteTitle();
+      if (lineTimer) { clearTimeout(lineTimer); lineTimer = null; }
       updatePreview(info);
       return;
     }
@@ -875,6 +1072,7 @@
     }
 
     updatePreview(info);
+    scheduleLine();   // 在下一行的时间戳那一刻再醒一次，消掉轮询间隔带来的延迟
   }
 
   /* ======================= 页面内快捷入口 ======================= */
@@ -1046,6 +1244,24 @@
     '.tip{margin-top:10px;font-size:12px;color:#aaa;line-height:1.6}',
     '.hint{margin:6px 0 2px;padding-left:2px;font-size:11.5px;color:#bbb;line-height:1.6}',
     '',
+    '/* 歌词同步：自动/手动分段控件 + 偏移滑杆 */',
+    '.seg{display:inline-flex;gap:2px;padding:3px;margin:2px 0 12px;background:#f4f4f5;border-radius:9px}',
+    '.segb{height:28px;padding:0 18px;border:0;border-radius:7px;background:transparent;color:#777;font:13px/1 inherit;',
+    '  cursor:pointer;transition:background .22s,color .22s,box-shadow .22s,transform .16s}',
+    '.segb:hover{color:#333}',
+    '.segb:active{transform:scale(.96)}',
+    '.segb.on{background:#fff;color:#ec4141;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.09)}',
+    '.syncbox{margin:0 0 12px;animation:syncIn .26s cubic-bezier(.22,.9,.3,1) both}',
+    '@keyframes syncIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}',
+    '.labrow{display:flex;align-items:center;justify-content:space-between;font-size:12.5px;color:#777;margin-bottom:9px}',
+    '.labrow b{color:#ec4141;font-weight:600;font-variant-numeric:tabular-nums;transition:color .2s}',
+    '.rng{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:3px;background:#eee;outline:none;cursor:pointer}',
+    '.rng::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#ec4141;',
+    '  border:2px solid #fff;box-shadow:0 1px 5px rgba(236,65,65,.45);transition:transform .16s}',
+    '.rng::-webkit-slider-thumb:hover{transform:scale(1.18)}',
+    '.rng::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:#ec4141;border:2px solid #fff;cursor:pointer}',
+    '.rngends{display:flex;justify-content:space-between;font-size:11px;color:#c0c0c0;margin:7px 0 10px}',
+    '',
     '.ft{padding:11px 18px 14px;display:flex;align-items:center;gap:10px;justify-content:flex-end;flex:none;',
     '  border-top:1px solid #f4f4f4;background:#fff}',
     '.ftinfo{margin-right:auto;font-size:11.5px;color:#c4c4c4}',
@@ -1101,6 +1317,7 @@
     '      <nav class="tabs" data-role="tabs">',
     '        <div class="pill" data-role="pill"></div>',
     '        <button class="tab" type="button" data-tab="general"><i class="tick"></i>常规</button>',
+    '        <button class="tab" type="button" data-tab="lyric"><i class="tick"></i>歌词同步</button>',
     '        <button class="tab" type="button" data-tab="smtc"><i class="tick"></i>系统媒体</button>',
     '        <button class="tab" type="button" data-tab="title"><i class="tick"></i>网页标题</button>',
     '        <button class="tab" type="button" data-tab="diag"><i class="tick"></i>诊断信息</button>',
@@ -1119,6 +1336,45 @@
     '            <div class="irow"><span>生效范围</span><b>music.163.com</b></div>',
     '          </div>',
     '          <div class="tip">修改后点「保存并关闭」才会生效。需要页面处于播放状态，系统媒体控制才会出现；歌词不显示时到「诊断信息」页看卡在哪一步。</div>',
+    '        </section>',
+    '',
+    '        <section class="page" data-page="lyric">',
+    '          <div class="cols">',
+    '            <div>',
+    '              <div class="sect" style="margin-top:0">歌词同步</div>',
+    '              <div class="seg" data-role="syncSeg">',
+    '                <button type="button" class="segb" data-v="auto">自动</button>',
+    '                <button type="button" class="segb" data-v="manual">手动</button>',
+    '              </div>',
+    '',
+    '              <div class="syncbox" data-role="autoBox">',
+    '                <div class="irow"><span>自动校准</span><b data-role="autoState">—</b></div>',
+    '                <div class="irow"><span>当前偏移</span><b data-role="autoVal">—</b></div>',
+    '              </div>',
+    '',
+    '              <div class="syncbox" data-role="manualBox">',
+    '                <div class="labrow"><span>偏移量</span><b data-role="offVal">无偏移</b></div>',
+    '                <input class="rng" type="range" min="-3" max="3" step="0.05" data-k="lyricOffset">',
+    '                <div class="rngends"><span>延后 3 秒</span><span>0</span><span>提前 3 秒</span></div>',
+    '                <div class="addrow">',
+    '                  <button class="btn mini" data-role="offm">延后 0.1 秒</button>',
+    '                  <button class="btn mini" data-role="offz">归零</button>',
+    '                  <button class="btn mini" data-role="offp">提前 0.1 秒</button>',
+    '                </div>',
+    '              </div>',
+    '',
+    '              <div class="hint" data-role="syncHint"></div>',
+    '            </div>',
+    '            <aside class="col-side">',
+    '              <div class="preview">',
+    '                <div class="plabel">实时对照</div>',
+    '                <div class="irow"><span>播放进度</span><b data-role="lRaw">—</b></div>',
+    '                <div class="irow"><span>生效偏移</span><b data-role="lOff">—</b></div>',
+    '                <div class="ptbox" data-role="lNow">—</div>',
+    '              </div>',
+    '              <div class="tip">一边放歌一边调最准：把系统媒体卡片上显示的歌词，和右上「实时对照」里这一句对着看。<br>改了要点「保存并关闭」才生效。</div>',
+    '            </aside>',
+    '          </div>',
     '        </section>',
     '',
     '        <section class="page" data-page="smtc">',
@@ -1238,6 +1494,7 @@
     if (k === 'titleEnabled') return draft.titleCfg.enabled;
     if (k === 'titleSep') return draft.titleCfg.sep;
     if (k === 'smtcSep') return draft.smtc.sep;
+    if (k === 'lyricOffset') return draft.lyric.offset;
     return draft[k];
   }
 
@@ -1246,6 +1503,7 @@
     if (k === 'titleEnabled') draft.titleCfg.enabled = v;
     else if (k === 'titleSep') draft.titleCfg.sep = v;
     else if (k === 'smtcSep') draft.smtc.sep = v;
+    else if (k === 'lyricOffset') draft.lyric.offset = clampOffset(v);   // 滑杆给的是字符串
     else draft[k] = v;
   }
 
@@ -1553,6 +1811,17 @@
       diag: shadow.querySelector('[data-role="diag"]'),
       presetsSmtc: shadow.querySelector('[data-role="presetsSmtc"]'),
       presetsTitle: shadow.querySelector('[data-role="presetsTitle"]'),
+      segBtns: shadow.querySelectorAll('[data-role="syncSeg"] .segb'),
+      autoBox: shadow.querySelector('[data-role="autoBox"]'),
+      manualBox: shadow.querySelector('[data-role="manualBox"]'),
+      autoState: shadow.querySelector('[data-role="autoState"]'),
+      autoVal: shadow.querySelector('[data-role="autoVal"]'),
+      offVal: shadow.querySelector('[data-role="offVal"]'),
+      rangeOffset: shadow.querySelector('[data-k="lyricOffset"]'),
+      syncHint: shadow.querySelector('[data-role="syncHint"]'),
+      lRaw: shadow.querySelector('[data-role="lRaw"]'),
+      lOff: shadow.querySelector('[data-role="lOff"]'),
+      lNow: shadow.querySelector('[data-role="lNow"]'),
       ioMask: shadow.querySelector('[data-role="iomask"]'),
       ioTitle: shadow.querySelector('[data-role="iotitle"]'),
       ioText: shadow.querySelector('[data-role="iotext"]'),
@@ -1639,6 +1908,46 @@
       keySet('smtcSep', els.smtcSepCustom.value);
       refreshPreview();
     });
+
+    /* ---- 歌词同步：自动 / 手动 + 偏移量 ---- */
+    Array.prototype.forEach.call(els.segBtns, function (b) {
+      b.addEventListener('click', function () {
+        if (!draft) return;
+        draft.lyric.sync = (b.getAttribute('data-v') === 'manual') ? 'manual' : 'auto';
+        updateSyncUI();
+        refreshPreview();
+      });
+    });
+
+    if (els.rangeOffset) {
+      els.rangeOffset.addEventListener('input', function () {
+        keySet('lyricOffset', this.value);
+        if (els.offVal) els.offVal.textContent = fmtOffset(draft.lyric.offset);
+        refreshPreview();
+      });
+    }
+
+    const nudge = function (d) {
+      if (!draft) return;
+      draft.lyric.offset = clampOffset(draft.lyric.offset + d);
+      updateSyncUI();
+      refreshPreview();
+    };
+    const bindNudge = function (role, d) {
+      const b = shadow.querySelector('[data-role="' + role + '"]');
+      if (b) b.addEventListener('click', function () { nudge(d); });
+    };
+    bindNudge('offm', -0.1);
+    bindNudge('offp', 0.1);
+    const offZero = shadow.querySelector('[data-role="offz"]');
+    if (offZero) {
+      offZero.addEventListener('click', function () {
+        if (!draft) return;
+        draft.lyric.offset = 0;
+        updateSyncUI();
+        refreshPreview();
+      });
+    }
 
     shadow.querySelector('[data-role="reset"]').addEventListener('click', function () {
       draft = normalizeCfg(DEF_CFG);
@@ -1738,6 +2047,7 @@
       else el.value = v;
     });
     renderMods();
+    updateSyncUI();
   }
 
   /* ========================== 选项卡 ========================== */
@@ -1803,12 +2113,50 @@
     });
   }
 
+  /* ---- 歌词同步选项卡：模式切换、偏移量显示 ---- */
+  function updateSyncUI() {
+    if (!els || !draft) return;
+    const lc = draft.lyric;
+    Array.prototype.forEach.call(els.segBtns || [], function (b) {
+      b.classList.toggle('on', b.getAttribute('data-v') === lc.sync);
+    });
+    if (els.autoBox) els.autoBox.style.display = (lc.sync === 'auto') ? '' : 'none';
+    if (els.manualBox) els.manualBox.style.display = (lc.sync === 'manual') ? '' : 'none';
+    if (els.rangeOffset) els.rangeOffset.value = lc.offset;
+    if (els.offVal) els.offVal.textContent = fmtOffset(lc.offset);
+    if (els.syncHint) {
+      els.syncHint.textContent = (lc.sync === 'manual')
+        ? '正值 = 歌词提前显示（歌词慢于声音时往右拖）；负值 = 歌词延后显示。'
+        : '自动模式下，歌词切换会精确排期到行时间戳那一刻，消掉脚本轮询间隔带来的延迟；能读到网易云页面上的歌词时，还会以页面歌词为基准微调。系统媒体卡片自身还有几百毫秒渲染延迟（脚本观测不到）——若仍觉得慢，切到手动加一点「提前」。';
+    }
+    updateSyncLive();
+  }
+
+  // 每帧刷新「自动校准状态」与右侧实时对照（面板开着时才跑）
+  function updateSyncLive() {
+    if (!els || !els.autoVal || !draft) return;
+    if (autoFrom === 'site') {
+      els.autoState.textContent = autoCount ? ('已对齐页面歌词 · 样本 ' + autoCount) : '正在采样…';
+    } else {
+      els.autoState.textContent = '未检测到页面歌词';
+    }
+    els.autoVal.textContent = fmtOffset(autoOffset);
+
+    if (els.lRaw) els.lRaw.textContent = (diag.time == null) ? '未获取到' : diag.time.toFixed(2) + ' 秒';
+    if (els.lOff) els.lOff.textContent = fmtOffset(offsetOf(draft));
+    if (els.lNow) {
+      const it = applyLyricOffset(lastInfo || {}, draft);
+      els.lNow.textContent = (it.lyric || '—') + (it.lyricTrans ? ' · ' + it.lyricTrans : '');
+    }
+  }
+
   function fillPreview(info, c) {
-    const meta = composeSmtc(info, c);
+    const it = applyLyricOffset(info, c);   // 按当前配置的偏移重新定位歌词，拖滑杆时预览立刻变
+    const meta = composeSmtc(it, c);
     els.pv1.textContent = meta.title || '—';
     els.pv2.textContent = meta.artist || '—';
     els.pv3.textContent = meta.album || '—';
-    const pt = composeTitle(info, c.titleCfg) || '';
+    const pt = composeTitle(it, c.titleCfg) || '';
     els.ptitle.textContent = pt || '—';
     if (els.ptitle2) els.ptitle2.textContent = pt || '—';
   }
@@ -1816,12 +2164,22 @@
   function refreshPreview() {
     if (!els || !draft) return;
     fillPreview(lastInfo || { song: '', artist: '', album: '', lyric: '', lyricTrans: '' }, draft);
+    updateSyncLive();
   }
 
   function updatePreview(info) {
     if (!els || !host || host.style.display === 'none' || !draft) return;
     fillPreview(info, draft);
     updateDiag();
+    updateSyncLive();
+  }
+
+  // 诊断用：当前歌词同步状态
+  function syncLine() {
+    const lc = cfg.lyric || DEF_CFG.lyric;
+    if (lc.sync === 'manual') return '手动 · ' + fmtOffset(lc.offset);
+    return '自动 · ' + fmtOffset(autoOffset) + '（' +
+      (autoFrom === 'site' ? '已对齐页面歌词 · 样本 ' + autoCount : '未检测到页面歌词') + '）';
   }
 
   function updateDiag() {
@@ -1835,6 +2193,7 @@
         ' · 翻译 ' + (diag.transRows > 0 ? diag.transRows + ' 行' : '无') +
         (diag.transState === 'matched' ? '（本句已匹配）' : (diag.transState === 'none' ? '（本句无翻译）' : '')),
       '播放进度：' + (diag.time == null ? '未获取到' : diag.time.toFixed(1) + ' 秒') + '（' + (timeMap[diag.timeSrc] || diag.timeSrc) + '）',
+      '歌词同步：' + esc(syncLine()),
       '当前歌词：' + (diag.lineIndex >= 0 ? '第 ' + (diag.lineIndex + 1) + ' 行 · ' : '') + esc((lastInfo && lastInfo.lyric) || '—')
     ];
     els.diag.innerHTML = rows.join('<br>');
