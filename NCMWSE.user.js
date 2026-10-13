@@ -2,9 +2,9 @@
 // @name         网易云音乐设置增强(NCMWSE)
 // @name:en      Netease Cloud Music WEB Setting Enhancement
 // @namespace    https://github.com/minecraftmc22/Netease_Cloud_Music_WEB_Setting_Enhancement
-// @version      1.3.7
-// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。设置面板采用选项卡布局：SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/翻译/专辑/网站名称），带快速预设、歌词延迟调节（自动校准/手动偏移）、歌词时间戳配对、配置导入导出与诊断信息
-// @description:en  Detect the song playing on Netease Cloud Music web player, sync "song / artist" or "current lyric / song-artist" to Windows SMTC, and customize the page title with drag-and-drop segments.
+// @version      1.3.8
+// @description  检测网易云音乐网页版正在播放的歌曲，把歌曲信息同步到系统媒体控制（SMTC）。设置面板采用选项卡布局：SMTC 的标题栏/歌手栏/专辑栏与网页标题栏均为可拖拽排序的片段模块（歌曲名/歌手/歌词/翻译/专辑/网站名称/连接符），连接符本身也是可拖拽、可改文本的片段，带快速预设、歌词延迟调节（自动校准/手动偏移）、歌词时间戳配对、配置导入导出与诊断信息
+// @description:en  Detect the song playing on Netease Cloud Music web player, sync "song / artist" or "current lyric / song-artist" to Windows SMTC, and customize the page title with drag-and-drop segments. Separators are draggable segments too.
 // @author       Minecraftmc22
 // @license      MIT
 // @icon         https://s1.music.126.net/style/favicon.ico
@@ -30,16 +30,19 @@
    *       （Win+G / 音量键 / 锁屏显示的媒体卡片）。
    *
    * 1) 系统媒体（SMTC）：三个可自由编排的栏位 —— 标题栏 / 歌手栏 / 专辑栏，
-   *      每栏都是一份「片段列表」（歌曲名 / 歌手 / 歌词 / 翻译 / 专辑 / 网站名称），
-   *      可拖拽排序、增删，三栏共用一个片段连接符；
+   *      每栏都是一份「片段列表」（歌曲名 / 歌手 / 歌词 / 翻译 / 专辑 / 网站名称 / 连接符），
+   *      可拖拽排序、增删；
    *      内置预设：歌曲名/歌手、歌词/歌曲名 - 歌手、歌词 翻译/歌曲名 - 歌手。
    * 2) 网页标题：同样的片段列表，可拖拽排序，
    *      内置预设：歌曲名 - 歌手 - 网站名称 / 歌词 翻译 - 歌曲名 - 歌手 / 歌词 翻译。
    * 3) 「翻译」本身就是一个片段：把它排进片段列表即可显示当前歌词的译文，
    *      位置随意（歌词 - 翻译、翻译 - 歌词、单独一栏都行）；
    *      本句没有译文时该片段为空并自动跳过，不会沿用上一句。
-   * 4) 配置可导出为 JSON（复制或下载），也能从粘贴内容 / 文件导入。
-   * 5) 歌词同步：歌词比声音慢/快时可以调偏移 ——
+   * 4) 「连接符」也是一个片段：在「添加片段」里选「连接符」，
+   *      拖动它到需要加分隔的位置，文本可改（一栏里能放多个、各不相同）；
+   *      它只在前面已经出现过内容片段时才生效，所以放在开头/结尾不会多出符号。
+   * 5) 配置可导出为 JSON（复制或下载），也能从粘贴内容 / 文件导入。
+   * 6) 歌词同步：歌词比声音慢/快时可以调偏移 ——
    *      「自动」把行切换精确排期到时间戳那一刻（消掉主循环 300ms 间隔的延迟），
    *        并在能读到页面歌词时以页面歌词为基准自动微调；
    *      「手动」用滑杆加减偏移量，用来抵消系统媒体卡片那侧的渲染延迟。
@@ -54,22 +57,29 @@
   /* ============================ 配置 ============================ */
 
   const CFG_KEY = 'ncm_smtc_cfg';
-  const VER = '1.3.7';
+  const VER = '1.3.8';
 
-  // 可用的片段类型（「翻译」也是片段：放在哪、和谁拼，全由片段顺序决定）
+  // 可用的片段类型（「翻译」与「连接符」都是片段：放在哪、和谁拼，全由片段顺序决定）
   const PART_META = {
     song: { name: '歌曲名', hasText: false },
     artist: { name: '歌手', hasText: false },
     lyric: { name: '歌词', hasText: false },
     trans: { name: '翻译', hasText: false },
     album: { name: '专辑', hasText: false },
-    site: { name: '网站名称', hasText: true, def: '网易云音乐' }
+    site: { name: '网站名称', hasText: true, def: '网易云音乐' },
+    sep: { name: '连接符', hasText: true, def: ' - ', isSep: true }
   };
-  const PART_ORDER = ['song', 'artist', 'lyric', 'trans', 'album', 'site'];
+  const PART_ORDER = ['song', 'artist', 'lyric', 'trans', 'album', 'site', 'sep'];
+  const SEP_DEF = ' - ';
 
   function defPart(type) {
     const m = PART_META[type];
     return { type: type, text: (m && m.hasText) ? (m.def || '') : '' };
+  }
+
+  // 连接符片段：文本就是它在两段内容之间补上的字符
+  function sepPart(text) {
+    return { type: 'sep', text: (typeof text === 'string') ? text : SEP_DEF };
   }
 
   /* 歌词偏移的可调范围（秒）：一般不会超过 1 秒，留到 3 秒足够应付各种场景 */
@@ -89,34 +99,33 @@
     enabled: true,
     showFab: true,            // 页面右下角显示设置按钮
     showArtwork: true,        // 显示专辑封面
+    sepV2: true,              // v1.3.8：连接符已改成片段，旧配置迁移标记
     lyric: {
       sync: 'auto',           // 'auto' | 'manual' —— 歌词延迟调节方式
       offset: 0               // 手动偏移（秒）：正 = 歌词提前显示，负 = 延后
     },
     smtc: {
-      sep: ' - ',             // 三栏共用的片段连接符
       title: [defPart('song')],
       artist: [defPart('artist')],
       album: [defPart('album')]
     },
     titleCfg: {                // 网页标题
       enabled: false,
-      sep: ' - ',
-      parts: [defPart('song'), defPart('artist'), defPart('site')]
+      parts: [defPart('song'), sepPart(), defPart('artist'), sepPart(), defPart('site')]
     }
   };
 
-  /* 预设：SMTC 三组、网页标题三组；是否带译文由片段列表里的「翻译」片段体现 */
+  /* 预设：SMTC 三组、网页标题三组；是否带译文、用什么分隔，都由片段列表自己描述 */
   const SMTC_PRESETS = [
-    { name: '歌曲名 / 歌手', sep: ' - ', title: ['song'], artist: ['artist'], album: ['album'] },
-    { name: '歌词 / 歌曲名 - 歌手', sep: ' - ', title: ['lyric'], artist: ['song', 'artist'], album: ['album'] },
-    { name: '歌词 翻译 / 歌曲名 - 歌手', sep: ' - ', title: ['lyric', 'trans'], artist: ['song', 'artist'], album: ['album'] }
+    { name: '歌曲名 / 歌手', title: ['song'], artist: ['artist'], album: ['album'] },
+    { name: '歌词 / 歌曲名 - 歌手', title: ['lyric'], artist: ['song', 'sep', 'artist'], album: ['album'] },
+    { name: '歌词 翻译 / 歌曲名 - 歌手', title: ['lyric', 'sep', 'trans'], artist: ['song', 'sep', 'artist'], album: ['album'] }
   ];
 
   const TITLE_PRESETS = [
-    { name: '歌曲名 - 歌手 - 网站名称', sep: ' - ', parts: ['song', 'artist', 'site'] },
-    { name: '歌词 翻译 - 歌曲名 - 歌手', sep: ' - ', parts: ['lyric', 'trans', 'song', 'artist'] },
-    { name: '歌词 翻译', sep: ' - ', parts: ['lyric', 'trans'] }
+    { name: '歌曲名 - 歌手 - 网站名称', parts: ['song', 'sep', 'artist', 'sep', 'site'] },
+    { name: '歌词 翻译 - 歌曲名 - 歌手', parts: ['lyric', 'sep', 'trans', 'sep', 'song', 'sep', 'artist'] },
+    { name: '歌词 翻译', parts: ['lyric', 'sep', 'trans'] }
   ];
 
   let cfg = readCfg();
@@ -177,7 +186,9 @@
 
   /* v1.3.5 迁移：旧的「启用翻译?」布尔开关 → 片段列表里的「翻译」片段。
      旧版译文是紧跟在「歌词」片段后面的，所以只在含歌词片段的那一栏插入「翻译」，
-     插在该栏最后一个「歌词」片段之后；该栏没有歌词片段则不动（旧版那样也看不到译文） */
+     插在该栏最后一个「歌词」片段之后；该栏没有歌词片段则不动（旧版那样也看不到译文）。
+     v1.3.8 起「歌词」后面可能紧跟一个（或几个）连接符片段 —— 译文要落到连接符之后，
+     才能还原旧版的「歌词 - 译文」而不吃掉分隔符 */
   function migrateTransFlag(list, flag) {
     const arr = Array.isArray(list) ? list : [];
     if (!flag) return arr;
@@ -188,13 +199,42 @@
     for (let i = 0; i < arr.length; i++) {
       if (arr[i] && arr[i].type === 'lyric') at = i;
     }
-    if (at >= 0) arr.splice(at + 1, 0, defPart('trans'));
+    if (at < 0) return arr;
+    let ins = at + 1;
+    while (ins < arr.length && arr[ins] && arr[ins].type === 'sep') ins++;
+    arr.splice(ins, 0, defPart('trans'));
     return arr;
+  }
+
+  /* v1.3.8 迁移：旧配置里连接符是全局独立字段（smtc.sep / titleCfg.sep）。
+     现在连接符是片段，这里把它按原样插进各片段之间，升级后观感与旧版一致；
+     末尾也补一个，以后往末尾添加片段时正好夹在两者中间。
+     已迁移过的配置（sepV2）不再处理，所以用户主动删掉所有连接符也能保持住 */
+  function injectSep(list, sepText) {
+    const arr = (Array.isArray(list) ? list : []).slice();
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] && arr[i].type === 'sep') return arr;   // 已是新结构
+    }
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      out.push(arr[i]);
+      if (i < arr.length - 1 || arr.length <= 1) out.push(sepPart(sepText));
+    }
+    return out;
+  }
+
+  function oldSep(src, key) {
+    const box = src && src[key];
+    return (box && typeof box.sep === 'string') ? box.sep : SEP_DEF;
   }
 
   // 读取时做一次合法性校验
   function normalizeCfg(c) {
-    const o = cloneCfg(c);
+    const raw = migrateCfg(c);
+    const needSep = !(raw && raw.sepV2);            // 老配置：连接符还是独立字段
+    const smtcSep = oldSep(raw, 'smtc');
+    const titleSep = oldSep(raw, 'titleCfg');
+    const o = cloneCfg(raw);
     const okPart = function (p) { return p.type && PART_META[p.type]; };
     o.smtc.title = o.smtc.title.filter(okPart);
     o.smtc.artist = o.smtc.artist.filter(okPart);
@@ -206,6 +246,16 @@
       o.smtc.title = [defPart('song')];
       o.smtc.artist = [defPart('artist')];
     }
+    // 旧版的全局连接符 → 逐段插入「连接符」片段
+    if (needSep) {
+      o.smtc.title = injectSep(o.smtc.title, smtcSep);
+      o.smtc.artist = injectSep(o.smtc.artist, smtcSep);
+      o.smtc.album = injectSep(o.smtc.album, smtcSep);
+      o.titleCfg.parts = injectSep(o.titleCfg.parts, titleSep);
+    }
+    delete o.smtc.sep;                              // 旧字段已废弃
+    delete o.titleCfg.sep;
+    o.sepV2 = true;
     // 旧配置的翻译开关（读旧版本存下来的值）→ 翻译片段
     const oldTrans = (o.showTranslation === true);
     const oldTitleTrans = (o.titleCfg.showTranslation === true);
@@ -217,8 +267,6 @@
     if (oldTitleTrans) o.titleCfg.parts = migrateTransFlag(o.titleCfg.parts, true);
     delete o.showTranslation;
     delete o.titleCfg.showTranslation;
-    if (typeof o.smtc.sep !== 'string') o.smtc.sep = DEF_CFG.smtc.sep;
-    if (typeof o.titleCfg.sep !== 'string') o.titleCfg.sep = DEF_CFG.titleCfg.sep;
     // 歌词同步：模式只认 auto / manual，偏移量限制在 ±OFF_MAX 秒内
     if (o.lyric.sync !== 'auto' && o.lyric.sync !== 'manual') o.lyric.sync = DEF_CFG.lyric.sync;
     o.lyric.offset = clampOffset(o.lyric.offset);
@@ -981,10 +1029,12 @@
     return info;
   }
 
-  /* 通用片段拼接：按 parts 顺序取值，空片段（如未取到的歌手、本句无译文）自动跳过，
-     避免拼出多余的分隔符。
-     注意「歌词」只出原文、「翻译」只出译文，两者都是普通片段，位置与前后关系由用户排 */
-  function joinParts(info, parts, sep) {
+  /* 通用片段拼接：按 parts 顺序取值。
+     普通片段取不到内容（没歌手 / 本句无译文）时整段跳过，不留空位；
+     「连接符」片段只在自己前面已经出现过内容片段时才落地，
+     所以把它放在开头、结尾或连放几个，都不会拼出多余的符号。
+     注意「歌词」只出原文、「翻译」只出译文，两者都是普通片段，位置由用户排 */
+  function joinParts(info, parts) {
     const values = {
       song: info.song || '',
       artist: info.artist || '',
@@ -993,33 +1043,43 @@
       trans: info.lyricTrans || '',
       site: ''
     };
-    const segs = [];
     const list = Array.isArray(parts) ? parts : [];
+    let out = '';
+    let pending = '';     // 攒着的连接符：等下一个有内容的片段来了才落地
+    let has = false;      // 是否已经拼出过内容
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
       if (!p || !PART_META[p.type]) continue;
+      if (p.type === 'sep') {
+        if (has || pending) pending += (typeof p.text === 'string') ? p.text : SEP_DEF;
+        continue;
+      }
       const v = (p.type === 'site') ? String(p.text || '').trim() : values[p.type];
-      if (v) segs.push(v);
+      if (!v) continue;
+      if (has && pending) out += pending;
+      pending = '';
+      out += v;
+      has = true;
     }
-    return segs.join(typeof sep === 'string' ? sep : ' - ');
+    return out;
   }
 
   // 系统媒体三栏文案（标题栏 / 歌手栏 / 专辑栏）
   function composeSmtc(info, c) {
     const conf = c || cfg;
     const s = conf.smtc || DEF_CFG.smtc;
-    const title = joinParts(info, s.title, s.sep);
+    const title = joinParts(info, s.title);
     return {
       title: title || info.song || '网易云音乐',   // 标题为空时兜底歌名，免得卡片空白
-      artist: joinParts(info, s.artist, s.sep),
-      album: joinParts(info, s.album, s.sep)
+      artist: joinParts(info, s.artist),
+      album: joinParts(info, s.album)
     };
   }
 
   // 网页标题拼接
   function composeTitle(info, tc) {
     if (!tc || !tc.enabled) return '';
-    return joinParts(info, tc.parts, tc.sep);
+    return joinParts(info, tc.parts);
   }
 
   function tick() {
@@ -1136,8 +1196,6 @@
   let ioMode = '';      // 当前导入/导出弹层的模式
   let curTab = 'general';   // 当前选项卡（记住用户上次停留的页）
 
-  const SEP_PRESETS = [' - ', ' · ', ' | ', ''];
-
   const CSS = [
     ':host{all:initial}',
     '*{box-sizing:border-box;margin:0;padding:0}',
@@ -1228,6 +1286,10 @@
     '@keyframes fragIn{from{opacity:0;transform:translateX(-7px)}to{opacity:1;transform:none}}',
     '.grip{color:#c8c8c8;font-size:13px;letter-spacing:-2px;user-select:none;cursor:grab;flex:none}',
     '.fname{font-size:13px;color:#333;flex:none;min-width:56px}',
+    '.frag.fsep{background:#fcfcfc}',
+    '.frag.fsep .fname{color:#a9a9a9}',
+    '.frag.fsep .ftext{flex:none;width:96px;text-align:center;color:#999;background:#fbfbfb}',
+    '.frag.fsep .ftext:focus{color:#555;background:#fff}',
     '.ftext{flex:1;min-width:0;height:26px;border:1px solid #e8e8e8;border-radius:6px;padding:0 7px;font-size:12px;',
     '  color:#555;outline:none;cursor:text;transition:border-color .18s}',
     '.ftext:focus{border-color:#ec4141}',
@@ -1236,9 +1298,6 @@
     '.del:hover{background:#fdecec;color:#ec4141;transform:scale(1.08)}',
     '.addrow{display:flex;gap:8px;margin-top:8px}',
     '.addrow select{flex:1}',
-    '.txt{width:100%;height:34px;border:1px solid #e5e5e5;border-radius:7px;padding:0 8px;font-size:13px;',
-    '  color:#333;outline:none;margin-top:8px;transition:border-color .18s,box-shadow .18s}',
-    '.txt:focus{border-color:#ec4141;box-shadow:0 0 0 3px rgba(236,65,65,.09)}',
     '.diag{margin:0 0 6px;padding:12px;border-radius:10px;background:#fbfbfb;border:1px solid #f0f0f0}',
     '.dbox{margin-top:6px;font-size:12px;color:#555;line-height:1.9;word-break:break-all}',
     '.tip{margin-top:10px;font-size:12px;color:#aaa;line-height:1.6}',
@@ -1383,16 +1442,8 @@
     '              <div class="glabel">快速预设</div>',
     '              <div class="presets" data-role="presetsSmtc"></div>',
     '              <div class="hint">「翻译」和歌曲名/歌手一样是可拖拽的片段：把它加进某一栏，就显示当前这句歌词的译文。译文按时间戳与本句原文配对 —— 本句没有译文时该片段为空、不会沿用上一句。</div>',
+    '              <div class="hint">「连接符」也是片段：在每栏下方的「添加片段」里选「连接符」，再拖到需要加分隔的位置，文本随改随用；一栏里可以放多个、各不相同（如歌手前用「 - 」、专辑前用「 · 」）。</div>',
     '              <div data-role="smtcMods"></div>',
-    '              <div class="glabel">片段连接符（三栏共用）</div>',
-    '              <select data-k="smtcSep">',
-    '                <option value=" - ">空格 - 空格</option>',
-    '                <option value=" · ">· 间隔点</option>',
-    '                <option value=" | ">| 竖线</option>',
-    '                <option value="">（无分隔）</option>',
-    '                <option value="__custom__">自定义…</option>',
-    '              </select>',
-    '              <input class="txt" data-role="smtcSepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
     '            </div>',
     '            <aside class="col-side">',
     '              <div class="preview">',
@@ -1419,15 +1470,7 @@
     '                <select data-role="addsel_pageTitle"></select>',
     '                <button class="btn mini" data-role="addbtn_pageTitle">添加片段</button>',
     '              </div>',
-    '              <div class="glabel">片段连接符</div>',
-    '              <select data-k="titleSep">',
-    '                <option value=" - ">空格 - 空格</option>',
-    '                <option value=" · ">· 间隔点</option>',
-    '                <option value=" | ">| 竖线</option>',
-    '                <option value="">（无分隔）</option>',
-    '                <option value="__custom__">自定义…</option>',
-    '              </select>',
-    '              <input class="txt" data-role="sepCustom" style="display:none" placeholder="输入自定义连接符，例如  ——  ">',
+    '              <div class="hint">分隔符由「连接符」片段负责：在「添加片段」里选「连接符」，拖到两个片段中间即可；不想要分隔就别放它。</div>',
     '            </div>',
     '            <aside class="col-side">',
     '              <div class="preview">',
@@ -1492,8 +1535,6 @@
   function keyGet(k) {
     if (!draft) return undefined;
     if (k === 'titleEnabled') return draft.titleCfg.enabled;
-    if (k === 'titleSep') return draft.titleCfg.sep;
-    if (k === 'smtcSep') return draft.smtc.sep;
     if (k === 'lyricOffset') return draft.lyric.offset;
     return draft[k];
   }
@@ -1501,8 +1542,6 @@
   function keySet(k, v) {
     if (!draft) return;
     if (k === 'titleEnabled') draft.titleCfg.enabled = v;
-    else if (k === 'titleSep') draft.titleCfg.sep = v;
-    else if (k === 'smtcSep') draft.smtc.sep = v;
     else if (k === 'lyricOffset') draft.lyric.offset = clampOffset(v);   // 滑杆给的是字符串
     else draft[k] = v;
   }
@@ -1553,7 +1592,8 @@
       ctx.map[pid] = p;
 
       const row = document.createElement('div');
-      row.className = 'frag';
+      const isSep = (p.type === 'sep');
+      row.className = isSep ? 'frag fsep' : 'frag';
       row.draggable = true;
       row.dataset.pid = pid;
 
@@ -1573,7 +1613,8 @@
         inp.type = 'text';
         inp.draggable = false;
         inp.value = p.text || '';
-        inp.placeholder = meta.def || '';
+        inp.placeholder = isSep ? '如  -  /  ·  /  |' : (meta.def || '');
+        inp.title = isSep ? '连接符文本：会补在前后两个有内容的片段之间' : '';
         inp.addEventListener('input', function () {
           p.text = inp.value;
           refreshPreview();
@@ -1658,7 +1699,6 @@
 
   function applySmtcPreset(ps) {
     if (!draft) return;
-    draft.smtc.sep = ps.sep;
     draft.smtc.title = partsOf(ps.title);
     draft.smtc.artist = partsOf(ps.artist);
     draft.smtc.album = partsOf(ps.album);
@@ -1670,7 +1710,6 @@
   function applyTitlePreset(ps) {
     if (!draft) return;
     draft.titleCfg.enabled = true;
-    draft.titleCfg.sep = ps.sep;
     draft.titleCfg.parts = partsOf(ps.parts);
     fillPanel();
     flashRows(['pageTitle'], true);
@@ -1806,8 +1845,6 @@
       pv3: shadow.querySelector('[data-role="pv3"]'),
       ptitle: shadow.querySelector('[data-role="ptitle"]'),
       ptitle2: shadow.querySelector('[data-role="ptitle2"]'),
-      sepCustom: shadow.querySelector('[data-role="sepCustom"]'),
-      smtcSepCustom: shadow.querySelector('[data-role="smtcSepCustom"]'),
       diag: shadow.querySelector('[data-role="diag"]'),
       presetsSmtc: shadow.querySelector('[data-role="presetsSmtc"]'),
       presetsTitle: shadow.querySelector('[data-role="presetsTitle"]'),
@@ -1883,30 +1920,9 @@
     Array.prototype.forEach.call(els.inputs, function (el) {
       el.addEventListener('change', function () {
         const k = el.getAttribute('data-k');
-        if (k === 'titleSep' || k === 'smtcSep') {
-          const custom = (k === 'titleSep') ? els.sepCustom : els.smtcSepCustom;
-          if (el.value === '__custom__') {
-            custom.style.display = '';
-            keySet(k, custom.value || ' - ');
-          } else {
-            custom.style.display = 'none';
-            keySet(k, el.value);
-          }
-        } else {
-          keySet(k, (el.type === 'checkbox') ? el.checked : el.value);
-        }
+        keySet(k, (el.type === 'checkbox') ? el.checked : el.value);
         refreshPreview();
       });
-    });
-
-    els.sepCustom.addEventListener('input', function () {
-      keySet('titleSep', els.sepCustom.value);
-      refreshPreview();
-    });
-
-    els.smtcSepCustom.addEventListener('input', function () {
-      keySet('smtcSep', els.smtcSepCustom.value);
-      refreshPreview();
     });
 
     /* ---- 歌词同步：自动 / 手动 + 偏移量 ---- */
@@ -2028,20 +2044,6 @@
     if (!els || !draft) return;
     Array.prototype.forEach.call(els.inputs, function (el) {
       const k = el.getAttribute('data-k');
-      if (k === 'titleSep' || k === 'smtcSep') {
-        const isTitle = (k === 'titleSep');
-        const sep = isTitle ? draft.titleCfg.sep : draft.smtc.sep;
-        const custom = isTitle ? els.sepCustom : els.smtcSepCustom;
-        if (SEP_PRESETS.indexOf(sep) >= 0) {
-          el.value = sep;
-          custom.style.display = 'none';
-        } else {
-          el.value = '__custom__';
-          custom.style.display = '';
-          custom.value = sep;
-        }
-        return;
-      }
       const v = keyGet(k);
       if (el.type === 'checkbox') el.checked = !!v;
       else el.value = v;
@@ -2091,7 +2093,14 @@
       if (!act && b.classList.contains('active')) act = b;
     });
     const h = act ? act.offsetHeight : 0;
-    if (!act || !h) { pill.style.opacity = '0'; return; }   // 面板未显示时量不到尺寸
+    if (!act || !h) {
+      // 面板刚打开时可能还没完成布局，量不到尺寸；稍后再量一次（只重试一次）
+      pill.style.opacity = '0';
+      if (!movePill.timer) {
+        movePill.timer = setTimeout(function () { movePill.timer = 0; movePill(); }, 80);
+      }
+      return;
+    }
     pill.style.height = h + 'px';
     pill.style.transform = 'translateY(' + act.offsetTop + 'px)';
     pill.style.opacity = '1';
